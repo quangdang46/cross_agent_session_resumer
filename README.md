@@ -678,6 +678,14 @@ casr cc resume <session-id> --source ~/.codex/sessions/2026/02/06/rollout-1.json
 - Some workspace extraction paths are heuristic-based (especially when source format lacks explicit workspace).
 - Resume acceptance depends on external provider behavior and may vary by provider version.
 
+## Editor / Terminal Integrations
+
+Community-built shortcuts that wrap `casr` for one-keystroke session forking:
+
+- **iTerm2 (macOS)** — [pirate/iterm-agent-fork](https://github.com/pirate/iterm-agent-fork): native iTerm hotkey to fork the active session into a different coding agent via `casr`.
+
+These are external projects, not maintained here. PRs to add other terminal/editor integrations to this list are welcome.
+
 ## FAQ
 
 ### Is casr only for one-way migration?
