@@ -178,6 +178,7 @@ fn init_tracing(cli: &Cli) {
 /// - `casr -cc <session-id> ...`
 /// - `casr -cod <session-id> ...`
 /// - `casr -gmi <session-id> ...`
+/// - `casr -opc <session-id> ...`
 ///
 /// Rewritten form:
 /// `casr [global-options] resume <target> <session-id> ...`
@@ -204,6 +205,7 @@ fn rewrite_shorthand_resume_args(args: Vec<OsString>) -> Vec<OsString> {
             "-cc" => Some("cc"),
             "-cod" => Some("cod"),
             "-gmi" => Some("gmi"),
+            "-opc" => Some("opencode"),
             _ => None,
         };
 
