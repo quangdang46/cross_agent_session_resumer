@@ -372,7 +372,10 @@ impl Provider for ClaudeCode {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now();
         let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 

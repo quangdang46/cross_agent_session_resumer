@@ -155,7 +155,7 @@ mod atomic_write_integration {
 
         // First write succeeds.
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("first write should succeed");
         assert!(!written.paths.is_empty());
 
@@ -177,7 +177,7 @@ mod atomic_write_integration {
         let session = make_session("/tmp");
 
         let first = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("first write");
         let first_path = first.paths[0].clone();
         let first_content = fs::read_to_string(&first_path).expect("read first");
@@ -194,7 +194,7 @@ mod atomic_write_integration {
         fs::write(&conflict_path, &first_content).expect("seed conflict file");
 
         let written = Codex
-            .write_session(&second_session, &WriteOptions { force: false })
+            .write_session(&second_session, &WriteOptions::default())
             .expect("second write to different path");
         assert!(written.paths[0].exists());
     }
@@ -218,7 +218,7 @@ mod atomic_write_integration {
         };
 
         let session = make_session("/tmp");
-        let err = Codex.write_session(&session, &WriteOptions { force: false });
+        let err = Codex.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "writing to read-only dir should fail; got: {:?}",
@@ -241,7 +241,7 @@ mod atomic_write_integration {
         };
 
         let session = make_session("/tmp");
-        let err = ClaudeCode.write_session(&session, &WriteOptions { force: false });
+        let err = ClaudeCode.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "CC writing to read-only dir should fail; got: {:?}",
@@ -264,7 +264,7 @@ mod atomic_write_integration {
         };
 
         let session = make_session("/tmp");
-        let err = Gemini.write_session(&session, &WriteOptions { force: false });
+        let err = Gemini.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "Gemini writing to read-only dir should fail; got: {:?}",
@@ -284,7 +284,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = ClaudeCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("CC write");
         let readback = ClaudeCode
             .read_session(&written.paths[0])
@@ -304,7 +304,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Codex write");
         let readback = Codex
             .read_session(&written.paths[0])
@@ -324,7 +324,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Gemini
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Gemini write");
         let readback = Gemini
             .read_session(&written.paths[0])
@@ -348,7 +348,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = ClawdBot
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("ClawdBot write");
         let readback = ClawdBot
             .read_session(&written.paths[0])
@@ -368,7 +368,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Vibe
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Vibe write");
         let readback = Vibe.read_session(&written.paths[0]).expect("Vibe readback");
         assert_eq!(
@@ -386,7 +386,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Factory
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Factory write");
         let readback = Factory
             .read_session(&written.paths[0])
@@ -406,7 +406,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = OpenClaw
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("OpenClaw write");
         let readback = OpenClaw
             .read_session(&written.paths[0])
@@ -426,7 +426,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = PiAgent
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("PiAgent write");
         let readback = PiAgent
             .read_session(&written.paths[0])
@@ -456,7 +456,7 @@ mod atomic_write_integration {
                     ..make_session("/tmp")
                 };
                 Codex
-                    .write_session(&session, &WriteOptions { force: false })
+                    .write_session(&session, &WriteOptions::default())
                     .unwrap_or_else(|e| panic!("write {i} failed: {e}"))
             })
             .collect();
@@ -491,7 +491,7 @@ mod atomic_write_integration {
                     ..make_session("/tmp")
                 };
                 ClaudeCode
-                    .write_session(&session, &WriteOptions { force: false })
+                    .write_session(&session, &WriteOptions::default())
                     .unwrap_or_else(|e| panic!("CC write {i} failed: {e}"))
             })
             .collect();
@@ -530,7 +530,7 @@ mod atomic_write_integration {
         };
 
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("single-message write");
         let readback = Codex
             .read_session(&written.paths[0])
@@ -559,7 +559,7 @@ mod atomic_write_integration {
         };
 
         let written = ClaudeCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("CC single-message write");
         let readback = ClaudeCode
             .read_session(&written.paths[0])
@@ -579,7 +579,7 @@ mod atomic_write_integration {
 
         let session = make_large_session("/tmp", 200);
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("large session write");
         let readback = Codex
             .read_session(&written.paths[0])
@@ -599,7 +599,7 @@ mod atomic_write_integration {
 
         let session = make_large_session("/tmp", 200);
         let written = ClaudeCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("CC large session write");
         let readback = ClaudeCode
             .read_session(&written.paths[0])
@@ -619,7 +619,7 @@ mod atomic_write_integration {
 
         let session = make_large_session("/tmp", 200);
         let written = Gemini
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Gemini large session write");
         let readback = Gemini
             .read_session(&written.paths[0])
@@ -643,7 +643,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("write");
 
         let parent = written.paths[0].parent().expect("parent dir");
@@ -666,7 +666,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = ClaudeCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("CC write");
 
         let parent = written.paths[0].parent().expect("parent dir");
@@ -693,7 +693,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = ClaudeCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("CC write");
         let readback = ClaudeCode
             .read_session(&written.paths[0])
@@ -714,7 +714,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Codex write");
         let readback = Codex
             .read_session(&written.paths[0])
@@ -739,7 +739,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = ClaudeCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("CC write");
         assert!(
             written.resume_command.contains("claude"),
@@ -760,7 +760,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Codex
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Codex write");
         assert!(
             written.resume_command.contains("codex"),
@@ -777,7 +777,7 @@ mod atomic_write_integration {
 
         let session = make_session("/tmp");
         let written = Gemini
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(&session, &WriteOptions::default())
             .expect("Gemini write");
         assert!(
             written.resume_command.contains("gemini"),
@@ -803,7 +803,7 @@ mod atomic_write_integration {
                 ..make_session("/tmp")
             };
             let written = ClaudeCode
-                .write_session(&session, &WriteOptions { force: false })
+                .write_session(&session, &WriteOptions::default())
                 .unwrap_or_else(|e| panic!("CC write {i} failed: {e}"));
             assert!(
                 ids.insert(written.session_id.clone()),

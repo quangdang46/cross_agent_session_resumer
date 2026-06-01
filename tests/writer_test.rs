@@ -148,7 +148,7 @@ fn writer_cc_roundtrip() {
 
     let session = simple_session();
     let written = ClaudeCode
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("CC write_session should succeed");
 
     assert_eq!(written.paths.len(), 1, "CC should produce exactly one file");
@@ -196,7 +196,7 @@ fn writer_cc_output_valid_jsonl() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -216,7 +216,7 @@ fn writer_cc_entries_have_required_fields() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -251,7 +251,7 @@ fn writer_cc_parent_uuid_chain() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -285,7 +285,7 @@ fn writer_cc_workspace_directory_placement() {
 
     let session = simple_session(); // workspace: /data/projects/myapp
     let written = ClaudeCode
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .unwrap();
 
     let path = &written.paths[0];
@@ -310,7 +310,7 @@ fn writer_cc_timestamps_are_rfc3339() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -335,7 +335,7 @@ fn writer_cc_tool_calls_in_assistant_content() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&tool_call_session(), &WriteOptions { force: false })
+        .write_session(&tool_call_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -372,7 +372,7 @@ fn writer_cc_model_name_on_assistant_entries() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -399,7 +399,7 @@ fn writer_codex_roundtrip() {
 
     let session = simple_session();
     let written = Codex
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("Codex write_session should succeed");
 
     assert_eq!(
@@ -447,7 +447,7 @@ fn writer_codex_output_valid_jsonl() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -472,7 +472,7 @@ fn writer_codex_session_meta_is_first_line() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -500,7 +500,7 @@ fn writer_codex_user_messages_are_event_msg() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -529,7 +529,7 @@ fn writer_codex_assistant_messages_are_response_item() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -571,7 +571,7 @@ fn writer_codex_reasoning_messages() {
     };
 
     let written = Codex
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -602,7 +602,7 @@ fn writer_codex_timestamps_are_numeric() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -625,7 +625,7 @@ fn writer_codex_date_hierarchy_in_path() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let path_str = written.paths[0].to_string_lossy().to_string();
@@ -677,7 +677,7 @@ fn writer_codex_tool_calls_in_response_content() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&tool_call_session(), &WriteOptions { force: false })
+        .write_session(&tool_call_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -714,7 +714,7 @@ fn writer_gemini_roundtrip() {
 
     let session = simple_session();
     let written = Gemini
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("Gemini write_session should succeed");
 
     assert_eq!(
@@ -763,7 +763,7 @@ fn writer_gemini_output_valid_json() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -778,7 +778,7 @@ fn writer_gemini_top_level_fields() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -818,7 +818,7 @@ fn writer_gemini_message_types() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -844,7 +844,7 @@ fn writer_gemini_timestamps_are_rfc3339() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -880,7 +880,7 @@ fn writer_gemini_hash_directory_structure() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let path = &written.paths[0];
@@ -932,7 +932,7 @@ fn writer_gemini_extra_fields_preserved() {
     });
 
     let written = Gemini
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -956,7 +956,7 @@ fn writer_gemini_project_hash_matches_workspace() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -985,7 +985,7 @@ fn writer_cc_default_workspace_uses_tmp() {
     session.workspace = None;
 
     let written = ClaudeCode
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1006,7 +1006,7 @@ fn writer_codex_default_workspace_uses_tmp() {
     session.workspace = None;
 
     let written = Codex
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1029,7 +1029,7 @@ fn writer_cline_roundtrip() {
 
     let session = simple_session();
     let written = Cline
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("Cline write_session should succeed");
 
     assert_eq!(written.paths.len(), 3, "Cline should write 3 task files");
@@ -1100,7 +1100,7 @@ fn writer_amp_roundtrip() {
 
     let session = simple_session();
     let written = Amp
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("Amp write_session should succeed");
 
     assert_eq!(written.paths.len(), 1, "Amp should write one thread file");
@@ -1151,7 +1151,7 @@ fn writer_amp_output_has_expected_shape() {
     let _env = EnvGuard::set("AMP_HOME", tmp.path());
 
     let written = Amp
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .expect("Amp write_session should succeed");
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1185,7 +1185,7 @@ fn writer_chatgpt_roundtrip() {
 
     let session = simple_session();
     let written = ChatGpt
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("ChatGPT write_session should succeed");
 
     assert_eq!(
@@ -1235,7 +1235,7 @@ fn writer_chatgpt_output_valid_json_with_mapping() {
     let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
 
     let written = ChatGpt
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1264,7 +1264,7 @@ fn writer_chatgpt_timestamps_are_float_seconds() {
     let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
 
     let written = ChatGpt
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1288,7 +1288,7 @@ fn writer_chatgpt_mapping_has_parent_chain() {
     let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
 
     let written = ChatGpt
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1318,7 +1318,7 @@ fn writer_clawdbot_roundtrip() {
 
     let session = simple_session();
     let written = ClawdBot
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("ClawdBot write_session should succeed");
 
     assert_eq!(
@@ -1368,7 +1368,7 @@ fn writer_clawdbot_output_valid_jsonl() {
     let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
 
     let written = ClawdBot
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1399,7 +1399,7 @@ fn writer_clawdbot_timestamps_are_rfc3339() {
     let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
 
     let written = ClawdBot
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1425,7 +1425,7 @@ fn writer_vibe_roundtrip() {
 
     let session = simple_session();
     let written = Vibe
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("Vibe write_session should succeed");
 
     assert_eq!(
@@ -1469,7 +1469,7 @@ fn writer_vibe_directory_structure() {
     let _env = EnvGuard::set("VIBE_HOME", tmp.path());
 
     let written = Vibe
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let path = &written.paths[0];
@@ -1493,7 +1493,7 @@ fn writer_vibe_output_valid_jsonl() {
     let _env = EnvGuard::set("VIBE_HOME", tmp.path());
 
     let written = Vibe
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1526,7 +1526,7 @@ fn writer_factory_roundtrip() {
 
     let session = simple_session();
     let written = Factory
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("Factory write_session should succeed");
 
     assert_eq!(
@@ -1576,7 +1576,7 @@ fn writer_factory_session_start_header() {
     let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
 
     let written = Factory
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1604,7 +1604,7 @@ fn writer_factory_output_valid_jsonl() {
     let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
 
     let written = Factory
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1629,7 +1629,7 @@ fn writer_factory_message_structure() {
     let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
 
     let written = Factory
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1676,7 +1676,7 @@ fn writer_openclaw_roundtrip() {
 
     let session = simple_session();
     let written = OpenClaw
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("OpenClaw write_session should succeed");
 
     assert_eq!(
@@ -1730,7 +1730,7 @@ fn writer_openclaw_session_header() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1762,7 +1762,7 @@ fn writer_openclaw_output_valid_jsonl() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1787,7 +1787,7 @@ fn writer_openclaw_message_ids_are_sequential() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1814,7 +1814,7 @@ fn writer_openclaw_tool_calls_in_content() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&tool_call_session(), &WriteOptions { force: false })
+        .write_session(&tool_call_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1849,7 +1849,7 @@ fn writer_piagent_roundtrip() {
 
     let session = simple_session();
     let written = PiAgent
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("PiAgent write_session should succeed");
 
     assert_eq!(
@@ -1903,7 +1903,7 @@ fn writer_piagent_session_header() {
     let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
 
     let written = PiAgent
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1931,7 +1931,7 @@ fn writer_piagent_filename_has_underscore() {
     let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
 
     let written = PiAgent
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let filename = written.paths[0].file_name().unwrap().to_str().unwrap();
@@ -1952,7 +1952,7 @@ fn writer_piagent_output_valid_jsonl() {
     let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
 
     let written = PiAgent
-        .write_session(&simple_session(), &WriteOptions { force: false })
+        .write_session(&simple_session(), &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1990,7 +1990,7 @@ fn writer_piagent_tool_role_normalized() {
     };
 
     let written = PiAgent
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();

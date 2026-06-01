@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::discovery::{ProviderRegistry, SourceHint};
@@ -38,6 +39,10 @@ pub struct ConvertOptions {
     /// Keep source-agent reasoning traces (dropped by default for cross-agent
     /// handoffs since the target agent cannot use another agent's hidden reasoning).
     pub keep_reasoning: bool,
+    /// Override the deterministic target session id. When `None`, the pipeline
+    /// derives a stable id from `(source_provider_alias, source_session_id)` so
+    /// re-running the same conversion never creates a duplicate.
+    pub target_session_id: Option<String>,
 }
 
 impl Default for ConvertOptions {
@@ -52,6 +57,7 @@ impl Default for ConvertOptions {
             max_context_tokens: 0,
             max_tool_output: 0,
             keep_reasoning: true,
+            target_session_id: None,
         }
     }
 }
@@ -64,6 +70,40 @@ pub struct ConversionResult {
     pub canonical_session: CanonicalSession,
     pub written: Option<WrittenSession>,
     pub warnings: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent target id derivation
+// ---------------------------------------------------------------------------
+
+/// Derive a stable, deterministic target session id from the source.
+///
+/// Same `(source_alias, source_session_id)` always produces the same id, so
+/// re-running the same conversion never creates a duplicate target file. The
+/// resulting string is safe for use as a filename stem across every supported
+/// provider (lowercase, digits, hyphens only).
+///
+/// Format: `casr-{alias}-{16hex}` where the hex is the first 8 bytes of
+/// `SHA256("{alias}:{session_id}")`. The hash binds the source identity so
+/// different source providers (or different source sessions) cannot collide
+/// even if their aliases share characters.
+///
+/// This is the default id used by [`ConversionPipeline::convert`]; callers can
+/// still override it via [`ConvertOptions::target_session_id`].
+pub fn derive_target_id(source_alias: &str, source_session_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source_alias.as_bytes());
+    hasher.update(b":");
+    hasher.update(source_session_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex_buf = String::with_capacity(16);
+    for byte in &digest[..8] {
+        // Manual two-char hex so we don't pull a `hex` crate just for this.
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        hex_buf.push(HEX[(byte >> 4) as usize] as char);
+        hex_buf.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    format!("casr-{source_alias}-{hex_buf}")
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +533,22 @@ but resume may fail until the CLI is installed.",
         }
 
         // 8. Write to target provider.
-        let write_opts = WriteOptions { force: opts.force };
+        //
+        // The target session id is stable across runs of the same conversion:
+        // either the caller supplied an override (`opts.target_session_id`),
+        // or we derive it from the source identity so re-running
+        // `casr <provider> resume <id>` never silently overwrites or duplicates
+        // the previous output. Writers use this id as the filename stem; the
+        // atomic-write step then surfaces `SessionConflict` if a prior
+        // conversion wrote to the same path and the user did not pass --force.
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| derive_target_id(resolved.provider.cli_alias(), session_id));
+        let write_opts = WriteOptions {
+            force: opts.force,
+            target_session_id: Some(target_session_id),
+        };
         let written = target_provider.write_session(&canonical, &write_opts)?;
         info!(
             target_session_id = written.session_id,
@@ -1508,5 +1563,64 @@ mod tests {
             1,
             "empty assistant turn should be dropped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Idempotent target id tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derive_target_id_is_stable() {
+        let a = derive_target_id("cc", "abc-123");
+        let b = derive_target_id("cc", "abc-123");
+        assert_eq!(a, b, "same (alias, session_id) must yield the same id");
+    }
+
+    #[test]
+    fn derive_target_id_changes_with_source_session_id() {
+        let a = derive_target_id("cc", "abc-123");
+        let b = derive_target_id("cc", "abc-124");
+        assert_ne!(
+            a, b,
+            "different source session ids must yield different ids"
+        );
+    }
+
+    #[test]
+    fn derive_target_id_changes_with_source_alias() {
+        let a = derive_target_id("cc", "shared");
+        let b = derive_target_id("cod", "shared");
+        let c = derive_target_id("gmi", "shared");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn derive_target_id_has_expected_format() {
+        let id = derive_target_id("cc", "abc-123");
+        // casr-{alias}-{16 lowercase hex chars}
+        assert!(
+            id.starts_with("casr-cc-"),
+            "id should start with `casr-cc-`: {id}"
+        );
+        let suffix = id.strip_prefix("casr-cc-").expect("prefix");
+        assert_eq!(suffix.len(), 16, "hex suffix must be 16 chars: {id}");
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hex suffix must be lowercase hex: {id}"
+        );
+    }
+
+    #[test]
+    fn derive_target_id_handles_unicode_and_special_chars() {
+        // Source ids from real providers can contain any characters; the derived
+        // id must still be safe as a filename (lowercase, digits, hyphens only).
+        let id = derive_target_id("cc", "session/with spaces & special?chars:42");
+        assert!(id.starts_with("casr-cc-"), "id should keep prefix: {id}");
+        let suffix = id.strip_prefix("casr-cc-").expect("prefix");
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

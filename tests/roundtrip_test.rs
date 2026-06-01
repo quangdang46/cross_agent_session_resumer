@@ -184,7 +184,7 @@ fn roundtrip_cc_to_codex() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Codex
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Cod: write should succeed");
 
     let readback = Codex
@@ -216,7 +216,7 @@ fn roundtrip_cc_to_gemini() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Gemini
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Gmi: write should succeed");
 
     let readback = Gemini
@@ -244,7 +244,7 @@ fn roundtrip_cc_to_cursor() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Cursor
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Cur: write should succeed");
 
     let readback = Cursor
@@ -268,7 +268,7 @@ fn roundtrip_cursor_to_cc() {
 
         let seed = read_cc_fixture("cc_simple");
         let written_cursor = Cursor
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Cur write should succeed");
 
         Cursor
@@ -281,7 +281,7 @@ fn roundtrip_cursor_to_cc() {
     let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
 
     let written_cc = ClaudeCode
-        .write_session(&cursor_canonical, &WriteOptions { force: false })
+        .write_session(&cursor_canonical, &WriteOptions::default())
         .expect("Cur→CC: write should succeed");
 
     let readback_cc = ClaudeCode
@@ -304,7 +304,7 @@ fn roundtrip_cc_to_opencode() {
 
     let original = read_cc_fixture("cc_simple");
     let written = OpenCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Opc: write should succeed");
 
     let readback = OpenCode
@@ -328,7 +328,7 @@ fn roundtrip_opencode_to_cc() {
 
         let seed = read_cc_fixture("cc_simple");
         let written_opencode = OpenCode
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Opc write should succeed");
 
         OpenCode
@@ -341,7 +341,7 @@ fn roundtrip_opencode_to_cc() {
     let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
 
     let written_cc = ClaudeCode
-        .write_session(&opencode_canonical, &WriteOptions { force: false })
+        .write_session(&opencode_canonical, &WriteOptions::default())
         .expect("Opc→CC: write should succeed");
 
     let readback_cc = ClaudeCode
@@ -364,7 +364,7 @@ fn roundtrip_cc_to_cline() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Cline
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Cln: write should succeed");
 
     let readback = Cline
@@ -384,7 +384,7 @@ fn roundtrip_cline_to_cc() {
 
         let seed = read_cc_fixture("cc_simple");
         let written_cline = Cline
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Cln write should succeed");
 
         Cline
@@ -397,7 +397,7 @@ fn roundtrip_cline_to_cc() {
     let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
 
     let written_cc = ClaudeCode
-        .write_session(&cline_canonical, &WriteOptions { force: false })
+        .write_session(&cline_canonical, &WriteOptions::default())
         .expect("Cln→CC: write should succeed");
 
     let readback_cc = ClaudeCode
@@ -416,7 +416,7 @@ fn roundtrip_cc_to_amp() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Amp
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Amp: write should succeed");
 
     let readback = Amp
@@ -436,7 +436,7 @@ fn roundtrip_amp_to_cc() {
 
         let seed = read_cc_fixture("cc_simple");
         let written_amp = Amp
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Amp write should succeed");
 
         Amp.read_session(&written_amp.paths[0])
@@ -448,7 +448,7 @@ fn roundtrip_amp_to_cc() {
     let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
 
     let written_cc = ClaudeCode
-        .write_session(&amp_canonical, &WriteOptions { force: false })
+        .write_session(&amp_canonical, &WriteOptions::default())
         .expect("Amp→CC: write should succeed");
 
     let readback_cc = ClaudeCode
@@ -467,7 +467,7 @@ fn roundtrip_cc_to_aider() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Aider
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Aid: write should succeed");
 
     let readback = Aider
@@ -487,7 +487,7 @@ fn roundtrip_aider_to_cc() {
 
         let seed = read_cc_fixture("cc_simple");
         let written_aider = Aider
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Aid write should succeed");
 
         Aider
@@ -500,7 +500,7 @@ fn roundtrip_aider_to_cc() {
     let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
 
     let written_cc = ClaudeCode
-        .write_session(&aider_canonical, &WriteOptions { force: false })
+        .write_session(&aider_canonical, &WriteOptions::default())
         .expect("Aid→CC: write should succeed");
 
     let readback_cc = ClaudeCode
@@ -523,7 +523,7 @@ fn roundtrip_codex_to_cc() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = ClaudeCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→CC: write should succeed");
 
     let readback = ClaudeCode
@@ -552,7 +552,7 @@ fn roundtrip_codex_to_gemini() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Gemini
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Gmi: write should succeed");
 
     let readback = Gemini
@@ -577,7 +577,7 @@ fn roundtrip_gemini_to_cc() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = ClaudeCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→CC: write should succeed");
 
     let readback = ClaudeCode
@@ -602,7 +602,7 @@ fn roundtrip_gemini_to_codex() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Codex
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Cod: write should succeed");
 
     let readback = Codex
@@ -625,7 +625,7 @@ fn roundtrip_cc_unicode_to_codex() {
 
     let original = read_cc_fixture("cc_unicode");
     let written = Codex
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC(unicode)→Cod: write should succeed");
 
     let readback = Codex
@@ -650,7 +650,7 @@ fn roundtrip_cc_unicode_to_gemini() {
 
     let original = read_cc_fixture("cc_unicode");
     let written = Gemini
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC(unicode)→Gmi: write should succeed");
 
     let readback = Gemini
@@ -671,7 +671,7 @@ fn roundtrip_codex_legacy_to_cc() {
 
     let original = read_codex_fixture("codex_legacy", "json");
     let written = ClaudeCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod(legacy)→CC: write should succeed");
 
     let readback = ClaudeCode
@@ -689,7 +689,7 @@ fn roundtrip_gemini_grounding_to_codex() {
 
     let original = read_gemini_fixture("gmi_grounding");
     let written = Codex
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi(grounding)→Cod: write should succeed");
 
     let readback = Codex
@@ -709,7 +709,7 @@ fn roundtrip_gemini_role_variant_to_cc() {
     // gmi_gemini_role uses 'gemini' role type instead of 'model'.
     let original = read_gemini_fixture("gmi_gemini_role");
     let written = ClaudeCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi(gemini-role)→CC: write should succeed");
 
     let readback = ClaudeCode
@@ -746,7 +746,7 @@ fn roundtrip_cc_missing_workspace_to_codex() {
     );
 
     let written = Codex
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC(no-ws)→Cod: write should succeed");
 
     let readback = Codex
@@ -766,7 +766,7 @@ fn roundtrip_gmi_missing_workspace_to_cc() {
 
     let original = read_gemini_fixture("gmi_missing_workspace");
     let written = ClaudeCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi(no-ws)→CC: write should succeed");
 
     let readback = ClaudeCode
@@ -788,7 +788,7 @@ fn roundtrip_cc_to_chatgpt() {
 
     let original = read_cc_fixture("cc_simple");
     let written = ChatGpt
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→ChatGPT: write should succeed");
 
     let readback = ChatGpt
@@ -811,7 +811,7 @@ fn roundtrip_chatgpt_to_cc() {
     // Seed: CC → ChatGPT.
     let original = read_cc_fixture("cc_simple");
     let written = ChatGpt
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("seed CC→ChatGPT write");
 
     let gpt_session = ChatGpt
@@ -820,7 +820,7 @@ fn roundtrip_chatgpt_to_cc() {
 
     // Target: ChatGPT → CC.
     let cc_written = ClaudeCode
-        .write_session(&gpt_session, &WriteOptions { force: false })
+        .write_session(&gpt_session, &WriteOptions::default())
         .expect("ChatGPT→CC write");
 
     let readback = ClaudeCode
@@ -842,7 +842,7 @@ fn roundtrip_cc_to_clawdbot() {
 
     let original = read_cc_fixture("cc_simple");
     let written = ClawdBot
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→ClawdBot: write should succeed");
 
     let readback = ClawdBot
@@ -863,7 +863,7 @@ fn roundtrip_clawdbot_to_cc() {
 
     let original = read_cc_fixture("cc_simple");
     let written = ClawdBot
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("seed CC→ClawdBot write");
 
     let cwb_session = ClawdBot
@@ -871,7 +871,7 @@ fn roundtrip_clawdbot_to_cc() {
         .expect("read ClawdBot");
 
     let cc_written = ClaudeCode
-        .write_session(&cwb_session, &WriteOptions { force: false })
+        .write_session(&cwb_session, &WriteOptions::default())
         .expect("ClawdBot→CC write");
 
     let readback = ClaudeCode
@@ -893,7 +893,7 @@ fn roundtrip_cc_to_vibe() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Vibe
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Vibe: write should succeed");
 
     let readback = Vibe
@@ -914,13 +914,13 @@ fn roundtrip_vibe_to_cc() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Vibe
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("seed CC→Vibe write");
 
     let vib_session = Vibe.read_session(&written.paths[0]).expect("read Vibe");
 
     let cc_written = ClaudeCode
-        .write_session(&vib_session, &WriteOptions { force: false })
+        .write_session(&vib_session, &WriteOptions::default())
         .expect("Vibe→CC write");
 
     let readback = ClaudeCode
@@ -942,7 +942,7 @@ fn roundtrip_cc_to_factory() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Factory
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→Factory: write should succeed");
 
     let readback = Factory
@@ -963,7 +963,7 @@ fn roundtrip_factory_to_cc() {
 
     let original = read_cc_fixture("cc_simple");
     let written = Factory
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("seed CC→Factory write");
 
     let fac_session = Factory
@@ -971,7 +971,7 @@ fn roundtrip_factory_to_cc() {
         .expect("read Factory");
 
     let cc_written = ClaudeCode
-        .write_session(&fac_session, &WriteOptions { force: false })
+        .write_session(&fac_session, &WriteOptions::default())
         .expect("Factory→CC write");
 
     let readback = ClaudeCode
@@ -993,7 +993,7 @@ fn roundtrip_cc_to_openclaw() {
 
     let original = read_cc_fixture("cc_simple");
     let written = OpenClaw
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→OpenClaw: write should succeed");
 
     let readback = OpenClaw
@@ -1014,7 +1014,7 @@ fn roundtrip_openclaw_to_cc() {
 
     let original = read_cc_fixture("cc_simple");
     let written = OpenClaw
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("seed CC→OpenClaw write");
 
     let ocl_session = OpenClaw
@@ -1022,7 +1022,7 @@ fn roundtrip_openclaw_to_cc() {
         .expect("read OpenClaw");
 
     let cc_written = ClaudeCode
-        .write_session(&ocl_session, &WriteOptions { force: false })
+        .write_session(&ocl_session, &WriteOptions::default())
         .expect("OpenClaw→CC write");
 
     let readback = ClaudeCode
@@ -1044,7 +1044,7 @@ fn roundtrip_cc_to_piagent() {
 
     let original = read_cc_fixture("cc_simple");
     let written = PiAgent
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("CC→PiAgent: write should succeed");
 
     let readback = PiAgent
@@ -1065,7 +1065,7 @@ fn roundtrip_piagent_to_cc() {
 
     let original = read_cc_fixture("cc_simple");
     let written = PiAgent
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("seed CC→PiAgent write");
 
     let pi_session = PiAgent
@@ -1073,7 +1073,7 @@ fn roundtrip_piagent_to_cc() {
         .expect("read PiAgent");
 
     let cc_written = ClaudeCode
-        .write_session(&pi_session, &WriteOptions { force: false })
+        .write_session(&pi_session, &WriteOptions::default())
         .expect("PiAgent→CC write");
 
     let readback = ClaudeCode
@@ -1096,7 +1096,7 @@ fn roundtrip_cursor_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = Cursor
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Cursor");
         Cursor.read_session(&written.paths[0]).expect("read Cursor")
     };
@@ -1106,7 +1106,7 @@ fn roundtrip_cursor_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&cursor_session, &WriteOptions { force: false })
+        .write_session(&cursor_session, &WriteOptions::default())
         .expect("Cursor→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1124,7 +1124,7 @@ fn roundtrip_cline_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = Cline
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Cline");
         Cline.read_session(&written.paths[0]).expect("read Cline")
     };
@@ -1134,7 +1134,7 @@ fn roundtrip_cline_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&cline_session, &WriteOptions { force: false })
+        .write_session(&cline_session, &WriteOptions::default())
         .expect("Cline→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1152,7 +1152,7 @@ fn roundtrip_aider_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = Aider
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Aider");
         Aider.read_session(&written.paths[0]).expect("read Aider")
     };
@@ -1162,7 +1162,7 @@ fn roundtrip_aider_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&aider_session, &WriteOptions { force: false })
+        .write_session(&aider_session, &WriteOptions::default())
         .expect("Aider→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1180,7 +1180,7 @@ fn roundtrip_amp_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = Amp
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Amp");
         Amp.read_session(&written.paths[0]).expect("read Amp")
     };
@@ -1190,7 +1190,7 @@ fn roundtrip_amp_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&amp_session, &WriteOptions { force: false })
+        .write_session(&amp_session, &WriteOptions::default())
         .expect("Amp→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1208,7 +1208,7 @@ fn roundtrip_opencode_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = OpenCode
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→OpenCode");
         OpenCode
             .read_session(&written.paths[0])
@@ -1220,7 +1220,7 @@ fn roundtrip_opencode_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&opencode_session, &WriteOptions { force: false })
+        .write_session(&opencode_session, &WriteOptions::default())
         .expect("OpenCode→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1238,7 +1238,7 @@ fn roundtrip_chatgpt_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = ChatGpt
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→ChatGPT");
         ChatGpt
             .read_session(&written.paths[0])
@@ -1250,7 +1250,7 @@ fn roundtrip_chatgpt_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&chatgpt_session, &WriteOptions { force: false })
+        .write_session(&chatgpt_session, &WriteOptions::default())
         .expect("ChatGPT→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1268,7 +1268,7 @@ fn roundtrip_clawdbot_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = ClawdBot
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→ClawdBot");
         ClawdBot
             .read_session(&written.paths[0])
@@ -1280,7 +1280,7 @@ fn roundtrip_clawdbot_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&clawdbot_session, &WriteOptions { force: false })
+        .write_session(&clawdbot_session, &WriteOptions::default())
         .expect("ClawdBot→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1298,7 +1298,7 @@ fn roundtrip_vibe_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = Vibe
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Vibe");
         Vibe.read_session(&written.paths[0]).expect("read Vibe")
     };
@@ -1308,7 +1308,7 @@ fn roundtrip_vibe_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&vibe_session, &WriteOptions { force: false })
+        .write_session(&vibe_session, &WriteOptions::default())
         .expect("Vibe→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1326,7 +1326,7 @@ fn roundtrip_factory_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = Factory
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→Factory");
         Factory
             .read_session(&written.paths[0])
@@ -1338,7 +1338,7 @@ fn roundtrip_factory_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&factory_session, &WriteOptions { force: false })
+        .write_session(&factory_session, &WriteOptions::default())
         .expect("Factory→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1356,7 +1356,7 @@ fn roundtrip_openclaw_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = OpenClaw
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→OpenClaw");
         OpenClaw
             .read_session(&written.paths[0])
@@ -1368,7 +1368,7 @@ fn roundtrip_openclaw_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&openclaw_session, &WriteOptions { force: false })
+        .write_session(&openclaw_session, &WriteOptions::default())
         .expect("OpenClaw→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1386,7 +1386,7 @@ fn roundtrip_piagent_to_codex() {
 
         let seed = read_cc_fixture("cc_simple");
         let written = PiAgent
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .expect("seed CC→PiAgent");
         PiAgent
             .read_session(&written.paths[0])
@@ -1398,7 +1398,7 @@ fn roundtrip_piagent_to_codex() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&piagent_session, &WriteOptions { force: false })
+        .write_session(&piagent_session, &WriteOptions::default())
         .expect("PiAgent→Codex write");
     let readback = Codex
         .read_session(&written.paths[0])
@@ -1419,7 +1419,7 @@ fn roundtrip_codex_to_cursor() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Cursor
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Cursor: write should succeed");
 
     let readback = Cursor
@@ -1438,7 +1438,7 @@ fn roundtrip_codex_to_cline() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Cline
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Cline: write should succeed");
 
     let readback = Cline
@@ -1457,7 +1457,7 @@ fn roundtrip_codex_to_aider() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Aider
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Aider: write should succeed");
 
     let readback = Aider
@@ -1476,7 +1476,7 @@ fn roundtrip_codex_to_amp() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Amp
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Amp: write should succeed");
 
     let readback = Amp
@@ -1495,7 +1495,7 @@ fn roundtrip_codex_to_opencode() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = OpenCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→OpenCode: write should succeed");
 
     let readback = OpenCode
@@ -1514,7 +1514,7 @@ fn roundtrip_codex_to_chatgpt() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = ChatGpt
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→ChatGPT: write should succeed");
 
     let readback = ChatGpt
@@ -1533,7 +1533,7 @@ fn roundtrip_codex_to_clawdbot() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = ClawdBot
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→ClawdBot: write should succeed");
 
     let readback = ClawdBot
@@ -1552,7 +1552,7 @@ fn roundtrip_codex_to_vibe() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Vibe
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Vibe: write should succeed");
 
     let readback = Vibe
@@ -1571,7 +1571,7 @@ fn roundtrip_codex_to_factory() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = Factory
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→Factory: write should succeed");
 
     let readback = Factory
@@ -1590,7 +1590,7 @@ fn roundtrip_codex_to_openclaw() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = OpenClaw
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→OpenClaw: write should succeed");
 
     let readback = OpenClaw
@@ -1609,7 +1609,7 @@ fn roundtrip_codex_to_piagent() {
 
     let original = read_codex_fixture("codex_modern", "jsonl");
     let written = PiAgent
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Cod→PiAgent: write should succeed");
 
     let readback = PiAgent
@@ -1676,7 +1676,7 @@ fn roundtrip_codex_exec_tool_results_to_piagent() {
     }
 
     let written = PiAgent
-        .write_session(&session, &WriteOptions { force: false })
+        .write_session(&session, &WriteOptions::default())
         .expect("CodExec→PiAgent: write should succeed");
 
     let readback = PiAgent
@@ -1699,7 +1699,7 @@ fn roundtrip_gemini_to_cursor() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Cursor
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Cursor: write should succeed");
 
     let readback = Cursor
@@ -1718,7 +1718,7 @@ fn roundtrip_gemini_to_cline() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Cline
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Cline: write should succeed");
 
     let readback = Cline
@@ -1737,7 +1737,7 @@ fn roundtrip_gemini_to_aider() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Aider
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Aider: write should succeed");
 
     let readback = Aider
@@ -1756,7 +1756,7 @@ fn roundtrip_gemini_to_amp() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Amp
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Amp: write should succeed");
 
     let readback = Amp
@@ -1775,7 +1775,7 @@ fn roundtrip_gemini_to_opencode() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = OpenCode
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→OpenCode: write should succeed");
 
     let readback = OpenCode
@@ -1794,7 +1794,7 @@ fn roundtrip_gemini_to_chatgpt() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = ChatGpt
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→ChatGPT: write should succeed");
 
     let readback = ChatGpt
@@ -1813,7 +1813,7 @@ fn roundtrip_gemini_to_clawdbot() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = ClawdBot
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→ClawdBot: write should succeed");
 
     let readback = ClawdBot
@@ -1832,7 +1832,7 @@ fn roundtrip_gemini_to_vibe() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Vibe
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Vibe: write should succeed");
 
     let readback = Vibe
@@ -1851,7 +1851,7 @@ fn roundtrip_gemini_to_factory() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = Factory
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→Factory: write should succeed");
 
     let readback = Factory
@@ -1870,7 +1870,7 @@ fn roundtrip_gemini_to_openclaw() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = OpenClaw
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→OpenClaw: write should succeed");
 
     let readback = OpenClaw
@@ -1889,7 +1889,7 @@ fn roundtrip_gemini_to_piagent() {
 
     let original = read_gemini_fixture("gmi_simple");
     let written = PiAgent
-        .write_session(&original, &WriteOptions { force: false })
+        .write_session(&original, &WriteOptions::default())
         .expect("Gmi→PiAgent: write should succeed");
 
     let readback = PiAgent
@@ -1922,7 +1922,7 @@ fn cross_provider_roundtrip(
 
         let seed = read_cc_fixture("cc_simple");
         let written = source
-            .write_session(&seed, &WriteOptions { force: false })
+            .write_session(&seed, &WriteOptions::default())
             .unwrap_or_else(|e| panic!("[{label}] seed write failed: {e}"));
         source
             .read_session(&written.paths[0])
@@ -1935,7 +1935,7 @@ fn cross_provider_roundtrip(
     let _env = EnvGuard::set(target_env_key, tmp.path());
 
     let written = target
-        .write_session(&source_session, &WriteOptions { force: false })
+        .write_session(&source_session, &WriteOptions::default())
         .unwrap_or_else(|e| panic!("[{label}] target write failed: {e}"));
     let readback = target
         .read_session(&written.paths[0])

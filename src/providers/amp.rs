@@ -99,11 +99,19 @@ impl Amp {
             .collect()
     }
 
+    /// Cheap pre-filter for whether `session_id` is a plausible filename stem.
+    ///
+    /// Originally this required the legacy `T-{uuid}` shape, but casr can now
+    /// write Amp threads with arbitrary ids (the pipeline derives a stable id
+    /// like `casr-cc-1bba483773621a5c` from the source identity), so the check
+    /// is permissive: non-empty, no path separators, no `.`/`..` traversal.
+    /// The actual existence check (file with the right name) happens next.
     fn looks_like_thread_id(session_id: &str) -> bool {
-        let Some(rest) = session_id.strip_prefix("T-") else {
-            return false;
-        };
-        uuid::Uuid::parse_str(rest).is_ok()
+        !session_id.is_empty()
+            && !session_id.contains('/')
+            && !session_id.contains('\\')
+            && session_id != "."
+            && session_id != ".."
     }
 
     fn owns_session_in_roots(session_id: &str, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -648,7 +656,10 @@ impl Provider for Amp {
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
         let threads_root = Self::pick_threads_root_for_write()?;
-        let thread_id = Self::generate_thread_id();
+        let thread_id = opts
+            .target_session_id
+            .clone()
+            .unwrap_or_else(Self::generate_thread_id);
 
         let created = session
             .started_at
@@ -1023,14 +1034,18 @@ mod tests {
 
     #[test]
     fn looks_like_thread_id_valid_and_invalid() {
+        // Legacy Amp format: T-{uuid} — still accepted.
         assert!(Amp::looks_like_thread_id(
             "T-550e8400-e29b-41d4-a716-446655440000"
         ));
-        assert!(!Amp::looks_like_thread_id(
-            "550e8400-e29b-41d4-a716-446655440000"
-        ));
-        assert!(!Amp::looks_like_thread_id("T-not-a-uuid"));
-        assert!(!Amp::looks_like_thread_id("T-"));
+        // casr-derived ids: casr-{alias}-{16hex} — also accepted.
+        assert!(Amp::looks_like_thread_id("casr-cc-1bba483773621a5c"));
+        // Reject empty and path-traversal payloads.
+        assert!(!Amp::looks_like_thread_id(""));
+        assert!(!Amp::looks_like_thread_id("."));
+        assert!(!Amp::looks_like_thread_id(".."));
+        assert!(!Amp::looks_like_thread_id("a/b"));
+        assert!(!Amp::looks_like_thread_id("a\\b"));
     }
 
     #[test]

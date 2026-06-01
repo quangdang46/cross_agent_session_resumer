@@ -535,7 +535,7 @@ impl Provider for OpenCode {
     fn write_session(
         &self,
         session: &CanonicalSession,
-        _opts: &WriteOptions,
+        opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
         let db_path = Self::choose_target_db_path(session)?;
         let mut conn = Self::open_db_rw(&db_path)?;
@@ -543,7 +543,10 @@ impl Provider for OpenCode {
 
         let has_count_trigger =
             Self::trigger_exists(&conn, "update_session_message_count_on_insert");
-        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now().timestamp_millis();
         let created_at = session.started_at.unwrap_or(now);
         let updated_at = session.ended_at.unwrap_or(now);
@@ -956,7 +959,13 @@ mod tests {
 
         let source = sample_session(&workspace);
         let written = OpenCode
-            .write_session(&source, &WriteOptions { force: false })
+            .write_session(
+                &source,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write should succeed");
 
         assert_eq!(written.resume_command, "opencode");
@@ -992,7 +1001,13 @@ mod tests {
 
         let source = sample_session(&workspace);
         let written = OpenCode
-            .write_session(&source, &WriteOptions { force: false })
+            .write_session(
+                &source,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write should succeed");
         let found = OpenCode.owns_session(&written.session_id);
 
@@ -1011,14 +1026,26 @@ mod tests {
         first.title = Some("Older Session".to_string());
         first.started_at = Some(1_700_000_000_000);
         let _first_written = OpenCode
-            .write_session(&first, &WriteOptions { force: false })
+            .write_session(
+                &first,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("first write");
 
         let mut second = sample_session(&workspace);
         second.title = Some("Newer Session".to_string());
         second.started_at = Some(1_800_000_000_000);
         let second_written = OpenCode
-            .write_session(&second, &WriteOptions { force: false })
+            .write_session(
+                &second,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("second write");
 
         let db_path = second_written
@@ -1044,7 +1071,13 @@ mod tests {
 
         let source = sample_session(&workspace);
         OpenCode
-            .write_session(&source, &WriteOptions { force: false })
+            .write_session(
+                &source,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write should succeed");
 
         let detection = OpenCode.detect();
@@ -1347,7 +1380,13 @@ mod tests {
         session.title = None;
 
         let written = OpenCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write");
         let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
 
@@ -1373,7 +1412,13 @@ mod tests {
         }
 
         let written = OpenCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write");
         let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
 
@@ -1391,7 +1436,13 @@ mod tests {
 
         let session = sample_session(&workspace);
         let written = OpenCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write");
         let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
 
@@ -1411,7 +1462,13 @@ mod tests {
 
         let session = sample_session(&workspace);
         let written = OpenCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write");
         let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
 
@@ -1432,7 +1489,13 @@ mod tests {
 
         let session = sample_session(&workspace);
         let written = OpenCode
-            .write_session(&session, &WriteOptions { force: false })
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("write");
         let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
 
@@ -1491,14 +1554,26 @@ mod tests {
         first.title = Some("First Session".to_string());
         first.started_at = Some(1_700_000_000_000);
         let first_written = OpenCode
-            .write_session(&first, &WriteOptions { force: false })
+            .write_session(
+                &first,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("first write");
 
         let mut second = sample_session(&workspace);
         second.title = Some("Second Session".to_string());
         second.started_at = Some(1_800_000_000_000);
         let second_written = OpenCode
-            .write_session(&second, &WriteOptions { force: false })
+            .write_session(
+                &second,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
             .expect("second write");
 
         let listed = OpenCode.list_sessions().expect("should return Some");

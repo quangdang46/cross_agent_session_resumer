@@ -1196,7 +1196,10 @@ Response three
         };
 
         let provider = Aider;
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions {
+            force: false,
+            target_session_id: None,
+        };
         let result = provider
             .write_session(&session, &opts)
             .expect("write should succeed");

@@ -259,8 +259,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        14,
-        "should list 14 providers (CC, Codex, Gemini, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent)"
+        15,
+        "should list 15 providers (CC, Codex, Gemini, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent, jCode)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -334,6 +334,7 @@ fn contract_providers_aliases_match_slugs() {
             "factory" => assert_eq!(*alias, "fac"),
             "openclaw" => assert_eq!(*alias, "ocl"),
             "pi-agent" => assert_eq!(*alias, "pi"),
+            "jcode" => assert_eq!(*alias, "jc"),
             other => panic!("Unexpected slug: {other}"),
         }
     }

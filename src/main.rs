@@ -352,6 +352,7 @@ fn cmd_resume(
         max_context_tokens,
         max_tool_output,
         keep_reasoning,
+        target_session_id: None,
     };
 
     let result = pipeline.convert(target, session_id, opts)?;

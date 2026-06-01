@@ -285,7 +285,7 @@ mod cc_golden {
         let tmp = TempDir::new().unwrap();
         let _guard = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = ClaudeCode.write_session(session, &opts).unwrap();
 
         let path = written.paths[0].clone();
@@ -617,7 +617,7 @@ mod codex_golden {
         let tmp = TempDir::new().unwrap();
         let _guard = EnvGuard::set("CODEX_HOME", tmp.path());
 
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = Codex.write_session(session, &opts).unwrap();
 
         let path = written.paths[0].clone();
@@ -907,7 +907,7 @@ mod gemini_golden {
         let tmp = TempDir::new().unwrap();
         let _guard = EnvGuard::set("GEMINI_HOME", tmp.path());
 
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = Gemini.write_session(session, &opts).unwrap();
 
         let path = written.paths[0].clone();
@@ -1157,7 +1157,7 @@ mod negative {
         let _guard = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
         let session = simple_session();
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = ClaudeCode.write_session(&session, &opts).unwrap();
 
         let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1178,7 +1178,7 @@ mod negative {
         let _guard = EnvGuard::set("CODEX_HOME", tmp.path());
 
         let session = simple_session();
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = Codex.write_session(&session, &opts).unwrap();
 
         let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1207,7 +1207,7 @@ mod negative {
         let _guard = EnvGuard::set("GEMINI_HOME", tmp.path());
 
         let session = simple_session();
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = Gemini.write_session(&session, &opts).unwrap();
 
         let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1232,7 +1232,7 @@ mod negative {
         let _guard = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
         let session = tool_call_session();
-        let opts = WriteOptions { force: false };
+        let opts = WriteOptions::default();
         let written = ClaudeCode.write_session(&session, &opts).unwrap();
 
         let content = std::fs::read_to_string(&written.paths[0]).unwrap();

@@ -27,10 +27,16 @@ use crate::discovery::DetectionResult;
 use crate::model::CanonicalSession;
 
 /// Options controlling how a session is written to disk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
     /// Overwrite existing session file (creates `.bak` backup).
     pub force: bool,
+    /// Use this id as the target session id (and filename stem). When `None`,
+    /// the writer is free to pick its own id (historically a fresh UUID).
+    /// The pipeline supplies a deterministic id derived from
+    /// `(source_provider_alias, source_session_id)` so re-running the same
+    /// conversion never produces duplicates.
+    pub target_session_id: Option<String>,
 }
 
 /// Describes the files produced by a successful write operation.

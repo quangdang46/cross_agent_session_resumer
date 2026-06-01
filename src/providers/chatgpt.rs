@@ -418,7 +418,10 @@ impl Provider for ChatGpt {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         // Determine target directory.
         let home = Self::home_dir()

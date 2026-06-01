@@ -272,7 +272,10 @@ impl Provider for JCode {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now();
         let target_path = Self::sessions_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot determine jcode sessions directory"))?

@@ -389,7 +389,7 @@ mod unix_error_paths {
         };
 
         let session = make_session("/tmp");
-        let err = Codex.write_session(&session, &WriteOptions { force: false });
+        let err = Codex.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "Codex: writing to read-only dir should fail; got {:?}",
@@ -411,7 +411,7 @@ mod unix_error_paths {
         };
 
         let session = make_session("/tmp");
-        let err = ClawdBot.write_session(&session, &WriteOptions { force: false });
+        let err = ClawdBot.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "ClawdBot: writing to read-only dir should fail; got {:?}",
@@ -433,7 +433,7 @@ mod unix_error_paths {
         };
 
         let session = make_session("/tmp");
-        let err = Vibe.write_session(&session, &WriteOptions { force: false });
+        let err = Vibe.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "Vibe: writing to read-only dir should fail; got {:?}",
@@ -455,7 +455,7 @@ mod unix_error_paths {
         };
 
         let session = make_session("/tmp");
-        let err = Factory.write_session(&session, &WriteOptions { force: false });
+        let err = Factory.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "Factory: writing to read-only dir should fail; got {:?}",
@@ -477,7 +477,7 @@ mod unix_error_paths {
         };
 
         let session = make_session("/tmp");
-        let err = OpenClaw.write_session(&session, &WriteOptions { force: false });
+        let err = OpenClaw.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "OpenClaw: writing to read-only dir should fail; got {:?}",
@@ -500,7 +500,7 @@ mod unix_error_paths {
         };
 
         let session = make_session("/tmp");
-        let err = PiAgent.write_session(&session, &WriteOptions { force: false });
+        let err = PiAgent.write_session(&session, &WriteOptions::default());
         assert!(
             err.is_err(),
             "PiAgent: writing to read-only dir should fail; got {:?}",
@@ -612,7 +612,7 @@ mod unix_error_paths {
         session.workspace = None;
 
         // CC writer should handle None workspace gracefully.
-        let result = ClaudeCode.write_session(&session, &WriteOptions { force: false });
+        let result = ClaudeCode.write_session(&session, &WriteOptions::default());
         // Either succeeds with a fallback workspace or errors — but should not panic.
         match result {
             Ok(written) => {
@@ -637,7 +637,7 @@ mod unix_error_paths {
         let mut session = make_session("/tmp");
         session.workspace = None;
 
-        let result = Codex.write_session(&session, &WriteOptions { force: false });
+        let result = Codex.write_session(&session, &WriteOptions::default());
         match result {
             Ok(written) => {
                 assert!(!written.paths.is_empty());
@@ -662,7 +662,7 @@ mod unix_error_paths {
         session.messages.clear();
 
         // Should either produce a file or error — never panic.
-        let _ = ClaudeCode.write_session(&session, &WriteOptions { force: false });
+        let _ = ClaudeCode.write_session(&session, &WriteOptions::default());
     }
 
     #[test]
@@ -674,7 +674,7 @@ mod unix_error_paths {
         let mut session = make_session("/tmp");
         session.messages.clear();
 
-        let _ = Codex.write_session(&session, &WriteOptions { force: false });
+        let _ = Codex.write_session(&session, &WriteOptions::default());
     }
 
     #[test]
@@ -686,7 +686,7 @@ mod unix_error_paths {
         let mut session = make_session("/tmp");
         session.messages.clear();
 
-        let _ = Gemini.write_session(&session, &WriteOptions { force: false });
+        let _ = Gemini.write_session(&session, &WriteOptions::default());
     }
 
     // =========================================================================

@@ -62,7 +62,7 @@ fn read_gemini_real_fixture() -> CanonicalSession {
 
 fn write_then_read(provider: &dyn Provider, session: &CanonicalSession) -> CanonicalSession {
     let written = provider
-        .write_session(session, &WriteOptions { force: false })
+        .write_session(session, &WriteOptions::default())
         .unwrap_or_else(|e| panic!("{} write failed: {e}", provider.slug()));
     provider
         .read_session(&written.paths[0])
