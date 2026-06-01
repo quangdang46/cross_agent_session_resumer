@@ -102,6 +102,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::claude_code::ClaudeCode),
             Box::new(crate::providers::codex::Codex),
             Box::new(crate::providers::gemini::Gemini),
+            Box::new(crate::providers::jcode::JCode),
             Box::new(crate::providers::cursor::Cursor),
             Box::new(crate::providers::cline::Cline),
             Box::new(crate::providers::aider::Aider),
@@ -543,6 +544,18 @@ impl ProviderRegistry {
 
                 if value.get("sessionId").is_some() && value.get("messages").is_some() {
                     return self.find_by_slug("gemini");
+                }
+
+                // jcode snapshot: top-level `id` + `messages` + `created_at`,
+                // and none of the gemini/chatgpt/codex marker keys.
+                if value.get("id").is_some()
+                    && value.get("messages").is_some()
+                    && value.get("created_at").is_some()
+                    && value.get("sessionId").is_none()
+                    && value.get("mapping").is_none()
+                    && value.get("session").is_none()
+                {
+                    return self.find_by_slug("jcode");
                 }
 
                 // ChatGPT mapping-based conversation format.

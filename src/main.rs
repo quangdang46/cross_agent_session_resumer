@@ -205,6 +205,7 @@ fn rewrite_shorthand_resume_args(args: Vec<OsString>) -> Vec<OsString> {
             "-cc" => Some("cc"),
             "-cod" => Some("cod"),
             "-gmi" => Some("gmi"),
+            "-jc" => Some("jc"),
             "-opc" => Some("opencode"),
             _ => None,
         };
