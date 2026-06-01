@@ -16,6 +16,7 @@ pub mod cursor;
 pub mod factory;
 pub mod gemini;
 pub mod jcode;
+pub mod kiro;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi_agent;

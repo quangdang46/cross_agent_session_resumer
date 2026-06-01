@@ -103,6 +103,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::codex::Codex),
             Box::new(crate::providers::gemini::Gemini),
             Box::new(crate::providers::jcode::JCode),
+            Box::new(crate::providers::kiro::Kiro),
             Box::new(crate::providers::cursor::Cursor),
             Box::new(crate::providers::cline::Cline),
             Box::new(crate::providers::aider::Aider),

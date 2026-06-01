@@ -38,6 +38,7 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("FACTORY_HOME", tmp.path().join("factory"))
         .env("OPENCLAW_HOME", tmp.path().join("openclaw"))
         .env("PI_AGENT_HOME", tmp.path().join("pi-agent"))
+        .env("KIRO_HOME", tmp.path().join("kiro"))
         .env("XDG_CONFIG_HOME", tmp.path().join("xdg-config"))
         .env("XDG_DATA_HOME", tmp.path().join("xdg-data"))
         .env("NO_COLOR", "1");
@@ -259,8 +260,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        15,
-        "should list 15 providers (CC, Codex, Gemini, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent, jCode)"
+        16,
+        "should list 16 providers (CC, Codex, Gemini, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent, jCode, Kiro)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -335,6 +336,7 @@ fn contract_providers_aliases_match_slugs() {
             "openclaw" => assert_eq!(*alias, "ocl"),
             "pi-agent" => assert_eq!(*alias, "pi"),
             "jcode" => assert_eq!(*alias, "jc"),
+            "kiro" => assert_eq!(*alias, "kr"),
             other => panic!("Unexpected slug: {other}"),
         }
     }
@@ -1035,6 +1037,8 @@ fn contract_list_provider_field_matches_slug() {
         "factory",
         "openclaw",
         "pi-agent",
+        "jcode",
+        "kiro",
     ];
     for item in items {
         let provider = item["provider"].as_str().unwrap();
