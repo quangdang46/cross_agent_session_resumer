@@ -1623,4 +1623,56 @@ mod tests {
         let suffix = id.strip_prefix("casr-cc-").expect("prefix");
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn derive_target_id_handles_empty_source_id() {
+        // Empty source id is unusual but must still produce a valid id
+        // (rather than panicking). Two calls with empty ids must be stable.
+        let a = derive_target_id("cc", "");
+        let b = derive_target_id("cc", "");
+        assert_eq!(a, b);
+        assert!(a.starts_with("casr-cc-"), "must keep alias prefix: {a}");
+        assert_eq!(a.len(), "casr-cc-".len() + 16);
+    }
+
+    #[test]
+    fn derive_target_id_handles_very_long_source_id() {
+        // Real source ids rarely exceed ~64 chars, but a maliciously long
+        // input must not break the format. The derived id stays bounded.
+        let huge = "a".repeat(10_000);
+        let id = derive_target_id("cod", &huge);
+        assert!(id.starts_with("casr-cod-"), "must keep prefix: {id}");
+        assert_eq!(id.len(), "casr-cod-".len() + 16, "must be bounded: {id}");
+    }
+
+    #[test]
+    fn derive_target_id_is_separator_sensitive() {
+        // A source id of "ab:cd" must NOT collide with two separate
+        // calls "ab" + "cd" (the colon is a structural separator).
+        // We use different aliases to make the comparison meaningful.
+        let joined = derive_target_id("cc", "ab:cd");
+        let split_a = derive_target_id("cc", "ab");
+        let split_b = derive_target_id("cc", "cd");
+        assert_ne!(
+            joined, split_a,
+            "colon-bearing id must not collide with prefix"
+        );
+        assert_ne!(
+            joined, split_b,
+            "colon-bearing id must not collide with suffix"
+        );
+    }
+
+    #[test]
+    fn derive_target_id_collision_resistance() {
+        // Sample 1000 different source ids and verify all derived ids are
+        // unique. With 64 bits of hash space and 1000 samples, the
+        // birthday-collision probability is ~2.7e-14 — vanishingly small.
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..1000 {
+            let id = derive_target_id("cc", &format!("session-{i}"));
+            assert!(seen.insert(id.clone()), "collision at i={i}: {id}");
+        }
+        assert_eq!(seen.len(), 1000);
+    }
 }
