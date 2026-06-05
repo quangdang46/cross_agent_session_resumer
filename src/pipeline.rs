@@ -83,10 +83,11 @@ pub struct ConversionResult {
 /// resulting string is safe for use as a filename stem across every supported
 /// provider (lowercase, digits, hyphens only).
 ///
-/// Format: `casr-{alias}-{16hex}` where the hex is the first 8 bytes of
-/// `SHA256("{alias}:{session_id}")`. The hash binds the source identity so
-/// different source providers (or different source sessions) cannot collide
-/// even if their aliases share characters.
+/// Format: a deterministic UUID v4 derived from the first 16 bytes of
+/// `SHA256("{alias}:{session_id}")`, with version and variant bits set.
+/// Claude Code's `--resume` requires a valid UUID; the hash binds the source
+/// identity so different source providers (or different source sessions)
+/// cannot collide even if their aliases share characters.
 ///
 /// This is the default id used by [`ConversionPipeline::convert`]; callers can
 /// still override it via [`ConvertOptions::target_session_id`].
@@ -96,14 +97,18 @@ pub fn derive_target_id(source_alias: &str, source_session_id: &str) -> String {
     hasher.update(b":");
     hasher.update(source_session_id.as_bytes());
     let digest = hasher.finalize();
-    let mut hex_buf = String::with_capacity(16);
-    for byte in &digest[..8] {
-        // Manual two-char hex so we don't pull a `hex` crate just for this.
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        hex_buf.push(HEX[(byte >> 4) as usize] as char);
-        hex_buf.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    format!("casr-{source_alias}-{hex_buf}")
+
+    // Build a deterministic UUID v4-shaped id from the first 16 bytes of the
+    // SHA-256 digest.  Claude Code's `--resume` requires a valid UUID; the
+    // `casr-{alias}-{hex}` format is rejected outright.  Setting the version
+    // nibble (byte 6 high) to 0x4 and variant bits (byte 8 high) to 0b10xx
+    // produces a well-formed v4-style UUID that is stable for the same input.
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1599,29 +1604,22 @@ mod tests {
     #[test]
     fn derive_target_id_has_expected_format() {
         let id = derive_target_id("cc", "abc-123");
-        // casr-{alias}-{16 lowercase hex chars}
+        // Must be a valid UUID (Claude Code requires this for --resume).
         assert!(
-            id.starts_with("casr-cc-"),
-            "id should start with `casr-cc-`: {id}"
-        );
-        let suffix = id.strip_prefix("casr-cc-").expect("prefix");
-        assert_eq!(suffix.len(), 16, "hex suffix must be 16 chars: {id}");
-        assert!(
-            suffix
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "hex suffix must be lowercase hex: {id}"
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "id must be a valid UUID: {id}"
         );
     }
 
     #[test]
     fn derive_target_id_handles_unicode_and_special_chars() {
         // Source ids from real providers can contain any characters; the derived
-        // id must still be safe as a filename (lowercase, digits, hyphens only).
+        // id must still be a valid UUID.
         let id = derive_target_id("cc", "session/with spaces & special?chars:42");
-        assert!(id.starts_with("casr-cc-"), "id should keep prefix: {id}");
-        let suffix = id.strip_prefix("casr-cc-").expect("prefix");
-        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "id must be a valid UUID: {id}"
+        );
     }
 
     #[test]
@@ -1631,18 +1629,23 @@ mod tests {
         let a = derive_target_id("cc", "");
         let b = derive_target_id("cc", "");
         assert_eq!(a, b);
-        assert!(a.starts_with("casr-cc-"), "must keep alias prefix: {a}");
-        assert_eq!(a.len(), "casr-cc-".len() + 16);
+        assert!(
+            uuid::Uuid::parse_str(&a).is_ok(),
+            "must be a valid UUID: {a}"
+        );
     }
 
     #[test]
     fn derive_target_id_handles_very_long_source_id() {
         // Real source ids rarely exceed ~64 chars, but a maliciously long
-        // input must not break the format. The derived id stays bounded.
+        // input must not break the format. The derived id is a fixed-length UUID.
         let huge = "a".repeat(10_000);
         let id = derive_target_id("cod", &huge);
-        assert!(id.starts_with("casr-cod-"), "must keep prefix: {id}");
-        assert_eq!(id.len(), "casr-cod-".len() + 16, "must be bounded: {id}");
+        assert!(
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "must be a valid UUID: {id}"
+        );
+        assert_eq!(id.len(), 36, "UUID must be 36 chars: {id}");
     }
 
     #[test]
