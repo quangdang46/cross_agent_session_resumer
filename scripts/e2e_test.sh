@@ -406,15 +406,22 @@ assert_file_count() {
 setup_cc_fixture() {
     local fixture_name="$1"
     local src="$FIXTURES_DIR/claude_code/${fixture_name}.jsonl"
-    local session_id cwd project_key
+    local session_id project_key
 
+    # Override the fixture's cwd to match the CI runner's CWD so that
+    # workspace-scoped session lookups (`casr list` defaults to $PWD) work.
+    # The project_key is derived from cwd, so this keeps everything in sync.
     session_id=$(head -1 "$src" | jq -r '.sessionId // "unknown"')
-    cwd=$(head -1 "$src" | jq -r '.cwd // "/tmp"')
-    project_key=$(echo "$cwd" | sed 's/[^a-zA-Z0-9]/-/g')
+    project_key=$(echo "$PROJECT_ROOT" | sed 's/[^a-zA-Z0-9]/-/g')
 
     local target_dir="$CLAUDE_HOME/projects/$project_key"
     mkdir -p "$target_dir"
-    cp "$src" "$target_dir/${session_id}.jsonl"
+
+    # Rewrite cwd in the first (session_meta) line of the JSONL.
+    head -1 "$src" | jq -c --arg cwd "$PROJECT_ROOT" '.cwd = $cwd' \
+        > "$target_dir/${session_id}.jsonl"
+    tail -n +2 "$src" >> "$target_dir/${session_id}.jsonl"
+
     echo "$session_id"
 }
 
