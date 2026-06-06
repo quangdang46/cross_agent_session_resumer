@@ -12,10 +12,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::discovery::DetectionResult;
 use crate::model::{
@@ -669,6 +670,23 @@ impl Provider for OpenCode {
 
         tx.commit().context("failed to commit transaction")?;
 
+        // Register the session in OpenCode's event/snapshot store so
+        // `opencode -s <id>` can find it. Falls back silently if the
+        // `opencode` CLI is not installed.
+        let export = build_export_json(
+            &target_session_id,
+            &title,
+            default_model.as_deref().unwrap_or(""),
+            session.workspace.as_deref().unwrap_or(Path::new("")),
+            created_at,
+            updated_at,
+            &session.messages,
+        );
+        match opencode_import(&target_session_id, &export) {
+            Ok(()) => {}
+            Err(e) => warn!(error = %e, "opencode import warning (session is still in SQLite)"),
+        }
+
         let virtual_path = Self::virtual_session_path(&db_path, &target_session_id);
         info!(
             session_id = target_session_id,
@@ -900,6 +918,189 @@ fn role_to_opencode(role: &MessageRole) -> &str {
         MessageRole::System => "system",
         MessageRole::Other(role) => role.as_str(),
     }
+}
+
+/// OpenCode native project ID — stable hex hash of the workspace path.
+fn project_id(workspace: &Path) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(workspace.to_string_lossy().as_bytes());
+    let result = hasher.finalize();
+    result.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Build a native OpenCode export JSON value that can be serialized into the
+/// `opencode import` format (each line: `INFO:<json>`).
+fn build_export_json(
+    target_session_id: &str,
+    title: &str,
+    model_id: &str,
+    workspace: &Path,
+    created_at: i64,
+    updated_at: i64,
+    messages: &[CanonicalMessage],
+) -> serde_json::Value {
+    let model_info = if model_id.is_empty() {
+        serde_json::json!({"id": "unknown", "providerID": "unknown"})
+    } else {
+        serde_json::json!({"id": model_id, "providerID": "unknown"})
+    };
+
+    let export_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|msg| {
+            let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+            let ts = msg.timestamp.unwrap_or(created_at);
+            let role = role_to_opencode(&msg.role);
+            let model = msg
+                .author
+                .as_deref()
+                .unwrap_or(model_id)
+                .to_string();
+
+            let mut parts: Vec<serde_json::Value> = Vec::new();
+
+            // Text content part.
+            if !msg.content.trim().is_empty() {
+                parts.push(serde_json::json!({
+                    "type": "text",
+                    "text": msg.content,
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            }
+
+            // Tool call parts.
+            for tc in &msg.tool_calls {
+                let input: serde_json::Value = tc
+                    .arguments
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| tc.arguments.clone());
+                let tc_id = tc.id.clone().unwrap_or_default();
+                parts.push(serde_json::json!({
+                    "type": "tool",
+                    "tool": tc.name,
+                    "callID": tc_id,
+                    "state": {
+                        "status": "success",
+                        "input": input,
+                        "output": "",
+                        "metadata": "",
+                        "time": {
+                            "start": ts,
+                            "end": ts,
+                        },
+                    },
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            }
+
+            // Tool result parts.
+            for tr in &msg.tool_results {
+                let call_id = tr.call_id.clone().unwrap_or_default();
+                parts.push(serde_json::json!({
+                    "type": "tool",
+                    "tool": "tool_result",
+                    "callID": call_id,
+                    "state": {
+                        "status": "success",
+                        "input": serde_json::Value::Null,
+                        "output": tr.content,
+                        "metadata": "",
+                        "time": {
+                            "start": ts,
+                            "end": ts,
+                        },
+                    },
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            }
+
+            serde_json::json!({
+                "info": {
+                    "role": role,
+                    "time": { "created": ts },
+                    "id": msg_id,
+                    "sessionID": target_session_id,
+                    "agent": model,
+                    "model": {
+                        "providerID": role,
+                        "modelID": model,
+                    },
+                    "summary": { "diffs": [] },
+                },
+                "parts": parts,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "info": {
+            "id": target_session_id,
+            "slug": title,
+            "projectID": project_id(workspace),
+            "directory": workspace.to_string_lossy(),
+            "title": title,
+            "version": "1.16.2",
+            "model": model_info,
+            "time": {
+                "created": created_at,
+                "updated": updated_at,
+            },
+        },
+        "messages": export_messages,
+    })
+}
+
+/// Run `opencode import` on the export JSON to register the session in OpenCode's
+/// event/snapshot store (the canonical source for `opencode -s`).
+///
+/// Falls back silently if `opencode` is not installed — the SQLite write still
+/// succeeds for tools that read it directly.
+fn opencode_import(session_id: &str, export: &serde_json::Value) -> anyhow::Result<()> {
+    let which = which::which("opencode");
+    let opencode_path = match which {
+        Ok(p) => p,
+        Err(_) => {
+            debug!("opencode CLI not found — skipping opencode import; session is SQLite-only");
+            return Ok(());
+        }
+    };
+
+    let export_line = format!("INFO:{}\n", serde_json::to_string(export)?);
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("casr_opencode_import_{}.json", session_id));
+    std::fs::write(&tmp_path, &export_line)
+        .with_context(|| format!("failed to write export to {}", tmp_path.display()))?;
+
+    let output = Command::new(&opencode_path)
+        .arg("import")
+        .arg(&tmp_path)
+        .output()
+        .with_context(|| format!("failed to run opencode import for {session_id}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            session_id,
+            stderr = %stderr,
+            "opencode import returned non-zero exit — session is SQLite-only"
+        );
+    } else {
+        info!(session_id, "opencode import succeeded — session is discoverable via `opencode -s`");
+    }
+
+    // Clean up temp file.
+    let _ = std::fs::remove_file(&tmp_path);
+
+    Ok(())
 }
 
 #[cfg(test)]
