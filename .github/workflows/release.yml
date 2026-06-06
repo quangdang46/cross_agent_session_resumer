@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            cross: true
+            suffix: linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            cross: true
+            suffix: linux-aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            cross: false
+            suffix: macos-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            cross: false
+            suffix: macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            cross: false
+            suffix: windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          bin_name="casr"
+          tag="${GITHUB_REF_NAME}"
+          archive="${bin_name}-${tag}-${{ matrix.suffix }}.tar.gz"
+
+          cd "target/${{ matrix.target }}/release"
+          tar czf "../../../${archive}" "$bin_name"
+          cd ../../..
+
+          shasum -a 256 "$archive" > "${archive}.sha256"
+
+          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binName = "casr.exe"
+          $tag = "${{ github.ref_name }}"
+          $archive = "casr-${tag}-${{ matrix.suffix }}.zip"
+
+          Compress-Archive -Path "target/${{ matrix.target }}/release/$binName" -DestinationPath $archive
+
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
+          "$hash  $archive" | Out-File -Encoding ascii "${archive}.sha256"
+
+          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: casr-${{ matrix.suffix }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List release assets
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
