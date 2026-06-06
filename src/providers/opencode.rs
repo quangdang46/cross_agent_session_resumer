@@ -946,99 +946,110 @@ fn build_export_json(
         serde_json::json!({"id": model_id, "providerID": "unknown"})
     };
 
-    let export_messages: Vec<serde_json::Value> = messages
-        .iter()
-        .map(|msg| {
-            let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-            let ts = msg.timestamp.unwrap_or(created_at);
-            let role = role_to_opencode(&msg.role);
-            let model = msg
-                .author
-                .as_deref()
-                .unwrap_or(model_id)
-                .to_string();
+    let mut export_messages: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+    let mut prev_msg_id: Option<String> = None;
+    for msg in messages {
+        let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+        let ts = msg.timestamp.unwrap_or(created_at);
+        // OpenCode import only accepts "user" and "assistant" roles.
+        // Map system/tool/other to the most compatible role.
+        let role = match role_to_opencode(&msg.role) {
+            "system" | "tool" => "assistant",
+            other => other,
+        };
+        let model = msg
+            .author
+            .as_deref()
+            .unwrap_or(model_id)
+            .to_string();
 
-            let mut parts: Vec<serde_json::Value> = Vec::new();
+        let mut parts: Vec<serde_json::Value> = Vec::new();
 
-            // Text content part.
-            if !msg.content.trim().is_empty() {
-                parts.push(serde_json::json!({
-                    "type": "text",
-                    "text": msg.content,
-                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                    "sessionID": target_session_id,
-                    "messageID": msg_id,
-                }));
-            }
+        // Text content part.
+        if !msg.content.trim().is_empty() {
+            parts.push(serde_json::json!({
+                "type": "text",
+                "text": msg.content,
+                "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                "sessionID": target_session_id,
+                "messageID": msg_id,
+            }));
+        }
 
-            // Tool call parts.
-            for tc in &msg.tool_calls {
-                let input: serde_json::Value = tc
-                    .arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_else(|| tc.arguments.clone());
-                let tc_id = tc.id.clone().unwrap_or_default();
-                parts.push(serde_json::json!({
-                    "type": "tool",
-                    "tool": tc.name,
-                    "callID": tc_id,
-                    "state": {
-                        "status": "success",
-                        "input": input,
-                        "output": "",
-                        "metadata": "",
-                        "time": {
-                            "start": ts,
-                            "end": ts,
-                        },
+        // Tool call parts.
+        for tc in &msg.tool_calls {
+            let input: serde_json::Value = tc
+                .arguments
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| tc.arguments.clone());
+            let tc_id = tc.id.clone().unwrap_or_default();
+            parts.push(serde_json::json!({
+                "type": "tool",
+                "tool": tc.name,
+                "callID": tc_id,
+                "state": {
+                    "status": "success",
+                    "input": input,
+                    "output": "",
+                    "metadata": "",
+                    "time": {
+                        "start": ts,
+                        "end": ts,
                     },
-                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                    "sessionID": target_session_id,
-                    "messageID": msg_id,
-                }));
-            }
-
-            // Tool result parts.
-            for tr in &msg.tool_results {
-                let call_id = tr.call_id.clone().unwrap_or_default();
-                parts.push(serde_json::json!({
-                    "type": "tool",
-                    "tool": "tool_result",
-                    "callID": call_id,
-                    "state": {
-                        "status": "success",
-                        "input": serde_json::Value::Null,
-                        "output": tr.content,
-                        "metadata": "",
-                        "time": {
-                            "start": ts,
-                            "end": ts,
-                        },
-                    },
-                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                    "sessionID": target_session_id,
-                    "messageID": msg_id,
-                }));
-            }
-
-            serde_json::json!({
-                "info": {
-                    "role": role,
-                    "time": { "created": ts },
-                    "id": msg_id,
-                    "sessionID": target_session_id,
-                    "agent": model,
-                    "model": {
-                        "providerID": role,
-                        "modelID": model,
-                    },
-                    "summary": { "diffs": [] },
                 },
-                "parts": parts,
-            })
-        })
-        .collect();
+                "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                "sessionID": target_session_id,
+                "messageID": msg_id,
+            }));
+        }
+
+        // Tool result parts.
+        for tr in &msg.tool_results {
+            let call_id = tr.call_id.clone().unwrap_or_default();
+            parts.push(serde_json::json!({
+                "type": "tool",
+                "tool": "tool_result",
+                "callID": call_id,
+                "state": {
+                    "status": "success",
+                    "input": serde_json::Value::Null,
+                    "output": tr.content,
+                    "metadata": "",
+                    "time": {
+                        "start": ts,
+                        "end": ts,
+                    },
+                },
+                "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                "sessionID": target_session_id,
+                "messageID": msg_id,
+            }));
+        }
+
+        let mut msg_info = serde_json::json!({
+            "role": role,
+            "time": { "created": ts },
+            "id": msg_id,
+            "sessionID": target_session_id,
+            "agent": model,
+            "model": {
+                "providerID": role,
+                "modelID": model,
+            },
+            "summary": { "diffs": [] },
+        });
+        // Native OpenCode uses parentID to link messages into a reply chain.
+        if let Some(ref prev) = prev_msg_id {
+            msg_info["parentID"] = serde_json::json!(prev);
+        }
+        prev_msg_id = Some(msg_id.clone());
+
+        export_messages.push(serde_json::json!({
+            "info": msg_info,
+            "parts": parts,
+        }));
+    }
 
     serde_json::json!({
         "info": {
@@ -1073,7 +1084,7 @@ fn opencode_import(session_id: &str, export: &serde_json::Value) -> anyhow::Resu
         }
     };
 
-    let export_line = format!("INFO:{}\n", serde_json::to_string(export)?);
+    let export_line = serde_json::to_string(export)?;
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join(format!("casr_opencode_import_{}.json", session_id));
