@@ -3,7 +3,7 @@
 # casr installer — Cross Agent Session Resumer
 #
 # One-liner install (with cache buster):
-#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/cross_agent_session_resumer/main/install.sh?$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/quangdang46/cross_agent_session_resumer/main/install.sh?$(date +%s)" | bash
 #
 # Or without cache buster:
 #   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/cross_agent_session_resumer/main/install.sh | bash
@@ -40,7 +40,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 
 VERSION="${VERSION:-}"
-OWNER="${OWNER:-Dicklesworthstone}"
+OWNER="${OWNER:-quangdang46}"
 REPO="${REPO:-cross_agent_session_resumer}"
 BINARY_NAME="casr"
 DEST_DEFAULT="$HOME/.local/bin"

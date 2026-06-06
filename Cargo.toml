@@ -1,10 +1,10 @@
 [package]
 name = "cross_agent_session_resumer"
-version = "0.2.2"
+version = "0.1.0"
 edition = "2024"
 description = "Cross Agent Session Resumer — resume AI coding sessions across providers (CLI binary: casr)"
 license-file = "LICENSE"
-repository = "https://github.com/Dicklesworthstone/cross_agent_session_resumer"
+repository = "https://github.com/quangdang46/cross_agent_session_resumer"
 keywords = ["cli", "agent", "session", "resume", "claude"]
 categories = ["command-line-utilities"]
 readme = "README.md"
