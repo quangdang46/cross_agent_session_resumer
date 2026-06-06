@@ -787,8 +787,12 @@ fn validate_session_errors_for_empty_and_single_sided() {
         .messages
         .retain(|m| matches!(m.role, MessageRole::User));
     assert!(
-        validate_session(&user_only).has_errors(),
-        "user-only session should fail validation"
+        !validate_session(&user_only).has_errors(),
+        "user-only session should not produce validation errors"
+    );
+    assert!(
+        !validate_session(&user_only).warnings.is_empty(),
+        "user-only session should produce validation warnings"
     );
 
     let mut assistant_only = valid_session_with_id("assistant-only");
@@ -796,8 +800,12 @@ fn validate_session_errors_for_empty_and_single_sided() {
         .messages
         .retain(|m| matches!(m.role, MessageRole::Assistant));
     assert!(
-        validate_session(&assistant_only).has_errors(),
-        "assistant-only session should fail validation"
+        !validate_session(&assistant_only).has_errors(),
+        "assistant-only session should not produce validation errors"
+    );
+    assert!(
+        !validate_session(&assistant_only).warnings.is_empty(),
+        "assistant-only session should produce validation warnings"
     );
 }
 

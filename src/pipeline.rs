@@ -151,8 +151,9 @@ pub fn validate_session(session: &CanonicalSession) -> ValidationResult {
         .any(|m| m.role == MessageRole::Assistant);
 
     if !has_user || !has_assistant {
-        result.errors.push(
-            "Session must have at least one user message and one assistant message.".to_string(),
+        result.warnings.push(
+            "Session has no assistant response or user message. The session may be incomplete."
+                .to_string(),
         );
     }
 
@@ -860,6 +861,15 @@ fn rollback_written_session(
 
     for (index, path) in written.paths.iter().enumerate() {
         if index == 0 && written.backup_path.is_some() {
+            continue;
+        }
+        // OpenCode virtual paths encode the session as "<opencode.db>/<session-id>"
+        // where the "parent" is a regular file (the SQLite DB), not a directory.
+        // Attempting remove_file on such paths produces ENOTDIR.
+        if let Some(parent) = path.parent()
+            && parent.is_file()
+        {
+            debug!(path = %path.display(), "skipping remove_file for virtual path (parent is a database file)");
             continue;
         }
         match std::fs::remove_file(path) {

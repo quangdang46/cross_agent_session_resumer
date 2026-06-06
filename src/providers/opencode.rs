@@ -831,14 +831,6 @@ fn parse_parts(parts: &serde_json::Value) -> (String, Vec<ToolCall>, Vec<ToolRes
     if content.trim().is_empty() {
         content = reasoning_chunks.join("\n");
     }
-    if content.trim().is_empty() {
-        let result_texts: Vec<&str> = tool_results
-            .iter()
-            .map(|result| result.content.as_str())
-            .filter(|text| !text.trim().is_empty())
-            .collect();
-        content = result_texts.join("\n");
-    }
 
     (content, tool_calls, tool_results)
 }
@@ -1230,7 +1222,9 @@ mod tests {
             {"type":"tool_result","data":{"tool_call_id":"c1","content":"file contents here","is_error":false}}
         ]);
         let (content, _, tool_results) = parse_parts(&raw);
-        assert_eq!(content, "file contents here");
+        // When there is no text part, content is empty (build_parts stores
+        // text in the text part, not in tool_result content).
+        assert!(content.is_empty());
         assert_eq!(tool_results.len(), 1);
     }
 

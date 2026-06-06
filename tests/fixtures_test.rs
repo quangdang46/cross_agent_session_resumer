@@ -600,11 +600,15 @@ fn fixture_edge_single_sided_cc() {
     let expected = load_expected("edge_single_sided_cc");
     assert_session_matches(&session, &expected, "edge_single_sided_cc");
 
-    // Extra: verify validation flags this as an error.
+    // Extra: verify validation flags this as a warning (not error).
     let validation = casr::pipeline::validate_session(&session);
     assert!(
-        validation.has_errors(),
-        "Single-sided session should produce validation errors"
+        !validation.warnings.is_empty(),
+        "Single-sided session should produce validation warnings"
+    );
+    assert!(
+        !validation.has_errors(),
+        "Single-sided session should not produce validation errors"
     );
 }
 
