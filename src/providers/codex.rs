@@ -249,8 +249,6 @@ impl Provider for Codex {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now();
-        // Codex uses Unix float timestamps (seconds), not ISO strings.
-        let now_unix: f64 = now.timestamp_millis() as f64 / 1000.0;
 
         let sessions_dir = Self::sessions_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot determine Codex sessions directory"))?;
@@ -289,14 +287,17 @@ impl Provider for Codex {
             }
         }))?);
 
-        // 2. Messages. Codex event timestamps are Unix float seconds.
+        // 2. Messages. Codex event timestamps are ISO strings in native format.
         for msg in &session.messages {
-            let msg_unix: f64 = msg
+            let msg_iso = msg
                 .timestamp
-                .map(|ms| ms as f64 / 1000.0)
-                .unwrap_or(now_unix);
+                .and_then(|ms| {
+                    chrono::DateTime::from_timestamp_millis(ms)
+                        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                })
+                .unwrap_or_else(|| now_iso.clone());
 
-            for event in codex_events_for_message(msg, msg_unix) {
+            for event in codex_events_for_message(msg, &msg_iso) {
                 lines.push(serde_json::to_string(&event)?);
             }
         }
@@ -340,9 +341,9 @@ impl Provider for Codex {
 
 /// Build the Codex JSONL event(s) for one canonical message.
 ///
-/// `msg_unix` is the event timestamp as Unix seconds (float), matching
-/// the numeric timestamp format Codex uses in its rollout files.
-fn codex_events_for_message(msg: &CanonicalMessage, msg_unix: f64) -> Vec<serde_json::Value> {
+/// `msg_ts` is the event timestamp as an ISO-8601 string, matching the
+/// string timestamp format Codex uses natively in rollout files.
+fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_json::Value> {
     // User messages that carry tool payloads must be serialized as response_item
     // envelopes; event_msg/user_message cannot represent tool_use/tool_result blocks.
     let user_needs_response_item = msg.role == MessageRole::User
@@ -351,7 +352,7 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_unix: f64) -> Vec<serde_
     match msg.role {
         MessageRole::User if !user_needs_response_item => vec![serde_json::json!({
             "type": "event_msg",
-            "timestamp": msg_unix,
+            "timestamp": msg_ts,
             "payload": {
                 "type": "user_message",
                 "message": msg.content,
@@ -359,7 +360,7 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_unix: f64) -> Vec<serde_
         })],
         MessageRole::User => vec![serde_json::json!({
             "type": "response_item",
-            "timestamp": msg_unix,
+            "timestamp": msg_ts,
             "payload": {
                 "type": "message",
                 "role": codex_role_string(&msg.role),
@@ -369,7 +370,7 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_unix: f64) -> Vec<serde_
         MessageRole::Assistant if msg.author.as_deref() == Some("reasoning") => {
             vec![serde_json::json!({
                 "type": "event_msg",
-                "timestamp": msg_unix,
+                "timestamp": msg_ts,
                 "payload": {
                     "type": "agent_reasoning",
                     "text": msg.content,
@@ -382,7 +383,7 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_unix: f64) -> Vec<serde_
         | MessageRole::Other(_) => {
             let mut events = vec![serde_json::json!({
                 "type": "response_item",
-                "timestamp": msg_unix,
+                "timestamp": msg_ts,
                 "payload": {
                     "type": "message",
                     "role": codex_role_string(&msg.role),
@@ -393,7 +394,7 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_unix: f64) -> Vec<serde_
             if let Some(info) = codex_token_count_info(&msg.extra) {
                 events.push(serde_json::json!({
                     "type": "event_msg",
-                    "timestamp": msg_unix,
+                    "timestamp": msg_ts,
                     "payload": {
                         "type": "token_count",
                         "info": info,
@@ -1264,7 +1265,7 @@ mod tests {
             }),
         };
 
-        let events = codex_events_for_message(&msg, 1700000000.0_f64);
+        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["type"], "response_item");
         assert_eq!(events[0]["payload"]["type"], "message");
@@ -1302,7 +1303,7 @@ mod tests {
             extra: json!({}),
         };
 
-        let events = codex_events_for_message(&msg, 1700000000.0_f64);
+        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "response_item");
         assert_eq!(events[0]["payload"]["type"], "message");
@@ -1619,7 +1620,7 @@ not json
             tool_results: vec![],
             extra: json!({}),
         };
-        let events = codex_events_for_message(&msg, 1700000000.0_f64);
+        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "event_msg");
         assert_eq!(events[0]["payload"]["type"], "user_message");
@@ -1638,7 +1639,7 @@ not json
             tool_results: vec![],
             extra: json!({}),
         };
-        let events = codex_events_for_message(&msg, 1700000000.0_f64);
+        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "event_msg");
         assert_eq!(events[0]["payload"]["type"], "agent_reasoning");
@@ -1669,7 +1670,7 @@ not json
             tool_results: vec![],
             extra: json!(null),
         };
-        let events = codex_events_for_message(&msg, 1700000000.0_f64);
+        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
         assert_eq!(
             events.len(),
             1,

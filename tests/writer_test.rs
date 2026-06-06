@@ -596,7 +596,7 @@ fn writer_codex_reasoning_messages() {
 }
 
 #[test]
-fn writer_codex_timestamps_are_numeric() {
+fn writer_codex_timestamps_are_iso_strings() {
     let _lock = CODEX_ENV.lock().unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
@@ -612,8 +612,13 @@ fn writer_codex_timestamps_are_numeric() {
         assert!(ts.is_some(), "Codex line {i}: missing timestamp");
         let ts = ts.unwrap();
         assert!(
-            ts.is_f64() || ts.is_i64() || ts.is_u64(),
-            "Codex line {i}: timestamp should be numeric, got: {ts}"
+            ts.is_string(),
+            "Codex line {i}: timestamp should be an ISO string, got: {ts}"
+        );
+        let s = ts.as_str().unwrap();
+        assert!(
+            s.contains('T') && s.ends_with('Z'),
+            "Codex line {i}: timestamp {s} is not ISO-8601 format"
         );
     }
 }
