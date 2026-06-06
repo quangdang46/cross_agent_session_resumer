@@ -293,7 +293,9 @@ fn main() -> ExitCode {
         Err(e) => {
             if cli.json {
                 let envelope = ErrorEnvelope::new(error_type_name(&e), format!("{e}"));
-                eprintln!(
+                // JSON output must go to stdout (not stderr) so machine consumers
+                // get clean structured output. Diagnostics (WARN logs) stay on stderr.
+                println!(
                     "{}",
                     serde_json::to_string_pretty(&envelope).unwrap_or_default()
                 );

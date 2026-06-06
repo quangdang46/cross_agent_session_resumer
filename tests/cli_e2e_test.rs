@@ -265,6 +265,8 @@ fn cli_list_shows_full_session_id_and_last_active_for_current_project_scope() {
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("create workspace");
+    // Canonicalize to resolve macOS /tmp → /private/tmp symlinks.
+    let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
     let workspace_str = workspace.to_string_lossy().to_string();
     let session_id = setup_cc_fixture_custom(
         &tmp,
@@ -510,9 +512,10 @@ fn cli_info_unknown_session_json_error() {
         .expect("info should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // JSON error envelope goes to stdout when --json is active; stderr is for diagnostics.
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value =
-        serde_json::from_str(&stderr).expect("JSON error should be valid JSON");
+        serde_json::from_str(&stdout).expect("JSON error should be valid JSON");
     assert_eq!(parsed["ok"], false);
     assert!(parsed["error_type"].as_str().is_some());
 }

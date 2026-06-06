@@ -595,10 +595,11 @@ assert_exit_fail "casr info with bad ID fails"
 log "TEST: Info unknown session --json"
 EXPECT_FAIL=1 run_casr "info bad json" --json info "nonexistent-id" || true
 assert_exit_fail "casr --json info with bad ID fails"
-if echo "$LAST_STDERR" | jq -e '.error_type' > /dev/null 2>&1; then
+# JSON structured output goes to stdout when --json is active.
+if echo "$LAST_STDOUT" | jq -e '.error_type' > /dev/null 2>&1; then
     pass "JSON error has error_type field"
 else
-    fail "JSON error has error_type field" "error_type present" "$(echo "$LAST_STDERR" | head -1)"
+    fail "JSON error has error_type field" "error_type present" "$(echo "$LAST_STDOUT" | head -1)"
 fi
 
 # ===========================================================================

@@ -858,8 +858,8 @@ fn contract_error_json_unknown_session() {
         .expect("info should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     assert_error_envelope(&parsed);
     assert_eq!(parsed["error_type"].as_str().unwrap(), "SessionNotFound");
@@ -876,8 +876,8 @@ fn contract_error_json_unknown_provider() {
         .expect("resume should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     assert_error_envelope(&parsed);
     assert_eq!(
@@ -895,8 +895,8 @@ fn contract_error_json_unknown_resume_session() {
         .expect("resume should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     assert_error_envelope(&parsed);
     assert_eq!(parsed["error_type"].as_str().unwrap(), "SessionNotFound");
@@ -910,8 +910,8 @@ fn contract_error_json_message_is_nonempty() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     let msg = parsed["message"].as_str().unwrap();
     assert!(!msg.is_empty(), "error message should not be empty");
@@ -944,8 +944,8 @@ fn contract_error_json_known_error_types() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let error_type = parsed["error_type"].as_str().unwrap();
     assert!(
         known_types.contains(&error_type),
@@ -954,7 +954,7 @@ fn contract_error_json_known_error_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-cutting: JSON output goes to stdout (success) or stderr (error)
+// Cross-cutting: JSON output always goes to stdout, stderr is diagnostics.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -982,7 +982,7 @@ fn contract_success_json_on_stdout_not_stderr() {
 }
 
 #[test]
-fn contract_error_json_on_stderr_not_stdout() {
+fn contract_error_json_on_stdout() {
     let tmp = TempDir::new().unwrap();
     let output = casr_cmd(&tmp)
         .args(["--json", "info", "no-such-session"])
@@ -990,18 +990,20 @@ fn contract_error_json_on_stderr_not_stdout() {
         .unwrap();
 
     assert!(!output.status.success());
-    // Error JSON should be on stderr.
+    // Error JSON should be on stdout (all structured output goes to stdout).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("error JSON should be on stdout");
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed["error_type"].as_str().is_some());
+    // Stderr should be empty or contain only diagnostic logs (not structured JSON).
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&stderr).is_ok(),
-        "error JSON should be on stderr"
-    );
-    // Stdout should be empty on error.
-    assert!(
-        output.stdout.is_empty(),
-        "stdout should be empty on error, got: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    if !stderr.is_empty() {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&stderr).is_err(),
+            "stderr should not contain JSON"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1054,7 +1054,10 @@ mod tests {
             .expect("write should succeed");
         let found = OpenCode.owns_session(&written.session_id);
 
-        assert_eq!(found.as_deref(), Some(written.paths[0].as_path()));
+        // Canonicalize both sides to handle macOS /tmp → /private/tmp symlinks.
+        let found_canonical = found.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let written_canonical = std::fs::canonicalize(&written.paths[0]).ok();
+        assert_eq!(found_canonical.as_deref(), written_canonical.as_deref());
     }
 
     #[test]
