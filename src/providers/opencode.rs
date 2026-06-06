@@ -544,6 +544,7 @@ impl Provider for OpenCode {
         let has_count_trigger =
             Self::trigger_exists(&conn, "update_session_message_count_on_insert");
         let target_session_id = opts
+
             .target_session_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -560,6 +561,17 @@ impl Provider for OpenCode {
                 .filter(|t| !t.is_empty())
         });
         let title = title.unwrap_or_else(|| "Converted session".to_string());
+
+        // If --force and session already exists, delete it first (messages
+        // cascade via FK).
+        if opts.force && Self::session_exists(&conn, &target_session_id) {
+            debug!(session_id = &target_session_id, "force: deleting existing OpenCode session");
+            conn.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                rusqlite::params![target_session_id],
+            )
+            .context("failed to delete existing OpenCode session for --force")?;
+        }
 
         let tx = conn.transaction().context("failed to begin transaction")?;
 
