@@ -6,7 +6,7 @@
 #   curl -fsSL "https://raw.githubusercontent.com/quangdang46/cross_agent_session_resumer/main/install.sh?$(date +%s)" | bash
 #
 # Or without cache buster:
-#   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/cross_agent_session_resumer/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/quangdang46/cross_agent_session_resumer/main/install.sh | bash
 #
 # Options:
 #   --version vX.Y.Z   Install specific version (default: latest)
@@ -1072,7 +1072,7 @@ Environment:
 
 Examples:
   # Install latest release
-  curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/cross_agent_session_resumer/main/install.sh?\$(date +%s)" | bash
+  curl -fsSL "https://raw.githubusercontent.com/quangdang46/cross_agent_session_resumer/main/install.sh?\$(date +%s)" | bash
 
   # Install specific version with self-test
   bash install.sh --version v0.2.0 --verify
