@@ -78,8 +78,8 @@ jobs:
             --report-time \
             --show-output \
             # GitHub runner output may prefix JSON with ANSI CSI escapes; strip them before JSON-line filtering.
-            | sed -E "s/${ESC}\\[[0-9;?]*[- /]*[@-~]//g" \
-            | awk '/^[[:space:]]*\\{/' \
+            | sed -E "s/${ESC}\\[[0-9;?]*[ -/]*[@-~]//g" \
+            | awk '/^[[:space:]]*[{]/' \
             | tee test-report.jsonl
         env:
           NO_COLOR: "1"
