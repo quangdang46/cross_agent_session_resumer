@@ -20,6 +20,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use rusqlite::Connection;
 use tracing::{debug, info, trace, warn};
 use walkdir::WalkDir;
 
@@ -271,12 +272,12 @@ impl Provider for Codex {
             .to_string_lossy()
             .to_string();
 
-        // Use the now ISO for metadata inside the payload (human-readable),
-        // but the top-level "timestamp" field is numeric as Codex expects.
+        // Both top-level and payload timestamps use ISO strings in native
+        // Codex sessions.
         let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         lines.push(serde_json::to_string(&serde_json::json!({
             "type": "session_meta",
-            "timestamp": now_unix,
+            "timestamp": &now_iso,
             "payload": {
                 "id": target_session_id,
                 "cwd": cwd,
@@ -311,6 +312,18 @@ impl Provider for Codex {
             messages = session.messages.len(),
             "Codex session written"
         );
+
+        // Register the session in Codex's SQLite thread registry so that
+        // `codex resume <id>` can discover it.
+        if let Err(e) = register_in_threads_db(
+            &target_session_id,
+            &outcome.target_path,
+            now.timestamp(),
+            &cwd,
+            &session.title,
+        ) {
+            warn!(error = %e, "failed to register session in Codex threads DB; resume may not work");
+        }
 
         Ok(WrittenSession {
             paths: vec![outcome.target_path],
@@ -1129,6 +1142,69 @@ fn session_meta_id(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Register a session in Codex's SQLite `threads` table so that
+/// `codex resume <id>` can discover it.
+///
+/// Codex v0.137+ uses `~/.codex/state_5.sqlite` as its session registry.
+/// The `threads` table maps session IDs to rollout file paths. Without
+/// this row, `codex resume` returns "No saved session found".
+fn register_in_threads_db(
+    session_id: &str,
+    rollout_path: &Path,
+    created_at: i64,
+    cwd: &str,
+    title: &Option<String>,
+) -> anyhow::Result<()> {
+    let db_path = Codex::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine Codex home directory"))?
+        .join("state_5.sqlite");
+
+    debug!(path = %db_path.display(), exists = db_path.exists(), "checking threads DB for registration");
+
+    if !db_path.exists() {
+        debug!(path = %db_path.display(), "threads DB not found; skipping registration");
+        return Ok(());
+    }
+
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+    let title_str = title.as_deref().unwrap_or("Resumed session");
+
+    conn.execute(
+        "INSERT OR IGNORE INTO threads (
+            id, rollout_path, created_at, updated_at,
+            source, model_provider, cwd, title,
+            sandbox_policy, approval_mode,
+            tokens_used, has_user_event, archived,
+            cli_version, first_user_message, memory_mode, thread_source
+        ) VALUES (
+            ?1, ?2, ?3, ?4,
+            ?5, ?6, ?7, ?8,
+            ?9, ?10,
+            0, 0, 0,
+            ?11, '', 'enabled', 'casr'
+        )",
+        rusqlite::params![
+            session_id,
+            rollout_path.to_string_lossy(),
+            created_at,
+            created_at,
+            "cli",
+            "openai",
+            cwd,
+            title_str,
+            r#"{"type":"managed","file_system":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"},{"path":{"type":"special","value":{"kind":"slash_tmp"}},"access":"write"},{"path":{"type":"special","value":{"kind":"tmpdir"}},"access":"write"}]},"network":"restricted"}"#,
+            "on-failure",
+            env!("CARGO_PKG_VERSION"),
+        ],
+    )
+    .with_context(|| format!("failed to insert thread {session_id}"))?;
+
+    debug!(session_id, path = %db_path.display(), "registered session in Codex threads DB");
+    Ok(())
 }
 
 #[cfg(test)]
