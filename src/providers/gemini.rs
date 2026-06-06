@@ -718,8 +718,12 @@ fn gemini_tool_call_result_text(call: &serde_json::Value) -> String {
 }
 
 fn gemini_message_content(msg: &CanonicalMessage) -> serde_json::Value {
+    // Prefer extra.content when it's Gemini-native format: a plain string
+    // (text-only) or an array of content blocks (tool-heavy). Reject non-string
+    // non-array content such as ChatGPT's {"parts": [...]} which would produce
+    // unreadable output for the Gemini reader.
     if let Some(content) = msg.extra.get("content")
-        && !content.is_null()
+        && (content.is_string() || content.is_array())
     {
         return content.clone();
     }

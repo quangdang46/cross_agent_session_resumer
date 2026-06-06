@@ -598,12 +598,26 @@ impl Provider for OpenCode {
         .context("failed to insert OpenCode session")?;
 
         let default_model = session.model_name.clone();
+        // OpenCode reads messages back in `(created_at ASC, id ASC)` order. The
+        // random UUID `id` would shuffle messages when several share the same
+        // timestamp (which happens whenever the source format — e.g. Cline's
+        // `api_conversation_history.json` — does not record per-message
+        // timestamps). Use a synthetic +1ms step so the read-back order
+        // matches the write order.
+        let mut synthetic_ts = created_at;
         for msg in &session.messages {
             let message_id = uuid::Uuid::new_v4().to_string();
             let parts = build_parts(msg);
             let parts_json =
                 serde_json::to_string(&parts).context("failed to serialize OpenCode parts")?;
-            let timestamp = msg.timestamp.unwrap_or(created_at);
+            let timestamp = match msg.timestamp {
+                Some(ts) => ts,
+                None => {
+                    let t = synthetic_ts;
+                    synthetic_ts = synthetic_ts.saturating_add(1);
+                    t
+                }
+            };
             let model = msg.author.clone().or_else(|| default_model.clone());
 
             tx.execute(

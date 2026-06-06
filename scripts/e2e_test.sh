@@ -134,6 +134,11 @@ export VIBE_HOME="$TMPDIR_ROOT/vibe"
 export FACTORY_HOME="$TMPDIR_ROOT/factory"
 export OPENCLAW_HOME="$TMPDIR_ROOT/openclaw"
 export PI_AGENT_HOME="$TMPDIR_ROOT/pi-agent"
+# Providers without isolated home dirs by default; override to keep the e2e
+# test hermetic regardless of host machine state.
+export KIRO_HOME="$TMPDIR_ROOT/kiro"
+export JCODE_HOME="$TMPDIR_ROOT/jcode"
+export JCODE_USE_XDG=0
 export XDG_CONFIG_HOME="$TMPDIR_ROOT/xdg-config"
 export XDG_DATA_HOME="$TMPDIR_ROOT/xdg-data"
 export NO_COLOR=1
@@ -558,7 +563,7 @@ log "TEST: List --limit"
 setup_cc_fixture "cc_malformed" > /dev/null
 run_casr "list limit" --json list --limit 1
 assert_exit_ok "casr list --limit 1 succeeds"
-local_count=$(echo "$LAST_STDOUT" | jq 'length')
+local_count=$(echo "$LAST_STDOUT" | jq '.items | length')
 if [[ "$local_count" -eq 1 ]]; then
     pass "list --limit 1 returns 1 session"
 else
@@ -1144,17 +1149,20 @@ assert_exit_ok "CC→PiAgent --force accepted"
 log "TEST: --force double write — CC→Codex"
 reset_env
 cc_sid=$(setup_cc_fixture "cc_simple")
-# Write twice with --force — both should succeed (unique paths).
+# Write twice with --force. The target session ID is intentionally
+# deterministic (derived from source alias + source session ID) so the second
+# write overwrites the first at the same path; --force is what permits that
+# overwrite. The two written_paths entries must therefore be identical.
 run_casr "force double: first" --json resume cod "$cc_sid" --force
 assert_exit_ok "CC→Codex --force first write"
-first_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+first_path=$(echo "$LAST_STDOUT" | jq -r '.written_paths[0] // empty')
 run_casr "force double: second" --json resume cod "$cc_sid" --force
 assert_exit_ok "CC→Codex --force second write"
-second_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
-if [[ "$first_sid" != "$second_sid" && -n "$first_sid" && -n "$second_sid" ]]; then
-    pass "Double write produces different session IDs ($first_sid vs $second_sid)"
+second_path=$(echo "$LAST_STDOUT" | jq -r '.written_paths[0] // empty')
+if [[ -n "$first_path" && "$first_path" == "$second_path" && -f "$first_path" ]]; then
+    pass "Double write overwrites the same deterministic path ($first_path)"
 else
-    fail "Double write produces different session IDs" "different UUIDs" "$first_sid vs $second_sid"
+    fail "Double write overwrites the same deterministic path" "matching path" "$first_path vs $second_path"
 fi
 
 # ===========================================================================

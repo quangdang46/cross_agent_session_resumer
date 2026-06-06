@@ -451,6 +451,12 @@ impl Provider for ChatGpt {
         let mut mapping = serde_json::Map::new();
         let mut prev_node_id: Option<String> = None;
 
+        // ChatGPT reader orders messages by `create_time`; missing timestamps
+        // fall back to node-id sort, which is random (UUID v4). Synthesize a
+        // monotonically-increasing +1ms timestamp so messages stay in write
+        // order when the source format (e.g. Cline) does not record per-message
+        // timestamps.
+        let mut synthetic_ts_secs = create_time;
         for msg in &session.messages {
             let node_id = uuid::Uuid::new_v4().to_string();
             let chatgpt_role = match msg.role {
@@ -461,15 +467,22 @@ impl Provider for ChatGpt {
                 MessageRole::Other(ref s) => s.as_str(),
             };
 
-            let msg_ts = msg.timestamp.map(|ms| ms as f64 / 1000.0);
+            let msg_ts_secs = match msg.timestamp {
+                Some(ms) => ms as f64 / 1000.0,
+                None => {
+                    let t = synthetic_ts_secs;
+                    synthetic_ts_secs += 0.001;
+                    t
+                }
+            };
 
             let mut message_obj = serde_json::json!({
                 "author": {"role": chatgpt_role},
                 "content": {"parts": [msg.content]},
             });
 
-            if let Some(ts) = msg_ts {
-                message_obj["create_time"] = serde_json::Value::from(ts);
+            if msg_ts_secs.is_finite() {
+                message_obj["create_time"] = serde_json::Value::from(msg_ts_secs);
             }
 
             // Add model info for assistant messages.
