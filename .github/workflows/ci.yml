@@ -76,8 +76,8 @@ jobs:
             --format json \
             --report-time \
             --show-output \
-            # Strip ANSI CSI sequences (ESC [ params intermediates final-byte) before JSON filtering.
-            | sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g' \
+            # GitHub runner output may prefix JSON with ANSI CSI escapes; strip them before JSON-line filtering.
+            | sed -E $'s/\x1B\\[[0-9;?]*[- /]*[@-~]//g' \
             | awk '/^[[:space:]]*\\{/' \
             | tee test-report.jsonl
         env:
