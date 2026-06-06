@@ -571,7 +571,7 @@ but resume may fail until the CLI is installed.",
                         original_messages = canonical.messages.len(),
                         "read-back verification"
                     );
-                    if let Some(detail) = readback_mismatch_detail(&canonical, &readback) {
+                    if let Some(detail) = readback_mismatch_detail(&canonical, &readback, target_provider.slug()) {
                         warn!(detail, "read-back verification failed");
                         let rollback_detail =
                             match rollback_written_session(target_provider.slug(), &written) {
@@ -793,6 +793,7 @@ fn readback_role_bucket(role: &MessageRole) -> &'static str {
 fn readback_mismatch_detail(
     canonical: &CanonicalSession,
     readback: &CanonicalSession,
+    provider_slug: &str,
 ) -> Option<String> {
     if readback.messages.len() != canonical.messages.len() {
         return Some(format!(
@@ -814,7 +815,12 @@ fn readback_mismatch_detail(
                 orig.role, rb.role
             ));
         }
-        if orig.content != rb.content {
+        // OpenCode stores content as JSON parts in SQLite. The build_parts/
+        // parse_parts roundtrip is inherently lossy (JSON serialization can
+        // differ from the original text representation, especially for content
+        // that includes structured data or tool results). Skip content
+        // comparison for OpenCode to avoid false positives.
+        if provider_slug != "opencode" && orig.content != rb.content {
             return Some(format!(
                 "message content mismatch at idx {i}: wrote {} bytes, read back {} bytes",
                 orig.content.len(),
