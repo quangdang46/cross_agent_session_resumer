@@ -70,13 +70,16 @@ jobs:
       - name: Run tests (libtest JSONL)
         run: |
           set -euo pipefail
+          ESC="$(printf '\033')"
           cargo test --all-targets -- \
             --test-threads=1 \
             -Z unstable-options \
             --format json \
             --report-time \
             --show-output \
-            | grep -E '^[[:space:]]*\\{' \
+            # GitHub runner output may prefix JSON with ANSI CSI escapes; strip them before JSON-line filtering.
+            | sed -E "s/${ESC}\\[[0-9;?]*[ -/]*[@-~]//g" \
+            | awk '/^[[:space:]]*[{]/' \
             | tee test-report.jsonl
         env:
           NO_COLOR: "1"
