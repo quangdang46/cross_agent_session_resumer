@@ -436,8 +436,17 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
 
         let source = Self::virtual_session_path(db_path, session_id);
 
+        // Normalize to the `ses_` prefix that native OpenCode uses. Older
+        // casr-written sessions may lack it; the reader handles this so that
+        // the canonical session (and any same-provider skip path in the
+        // pipeline) always produces a valid resume command.
+        //
+        // We do this *after* the DB query so the raw ID is used for the DB
+        // lookup; only the canonical output gets the prefix.
+        let canonical_session_id = ensure_ses_prefix(session_id);
+
         Ok(CanonicalSession {
-            session_id: session_id.to_string(),
+            session_id: canonical_session_id,
             provider_slug: "opencode".to_string(),
             workspace: Self::workspace_from_db_path(db_path),
             title,
