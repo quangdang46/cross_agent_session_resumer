@@ -543,10 +543,11 @@ impl Provider for OpenCode {
 
         let has_count_trigger =
             Self::trigger_exists(&conn, "update_session_message_count_on_insert");
-        let target_session_id = opts
+        let raw_session_id = opts
             .target_session_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = ensure_ses_prefix(&raw_session_id);
         let now = chrono::Utc::now().timestamp_millis();
         let created_at = session.started_at.unwrap_or(now);
         let updated_at = session.ended_at.unwrap_or(now);
@@ -652,9 +653,11 @@ impl Provider for OpenCode {
         })
     }
 
-    fn resume_command(&self, _session_id: &str) -> String {
-        // OpenCode has no session-id-specific resume flag.
-        "opencode".to_string()
+    fn resume_command(&self, session_id: &str) -> String {
+        // OpenCode preserves session identity (+cursor) across restarts, so
+        // resuming with a specific session ID lets the user open a past
+        // conversation with `opencode -s <ses_...>`.
+        format!("opencode -s {}", session_id)
     }
 
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
@@ -856,6 +859,15 @@ fn build_parts(message: &CanonicalMessage) -> serde_json::Value {
     serde_json::Value::Array(parts)
 }
 
+/// Ensure a session ID has the `ses_` prefix that native OpenCode sessions use.
+fn ensure_ses_prefix(session_id: &str) -> String {
+    if session_id.starts_with("ses_") {
+        session_id.to_string()
+    } else {
+        format!("ses_{}", session_id)
+    }
+}
+
 fn role_to_opencode(role: &MessageRole) -> &str {
     match role {
         MessageRole::User => "user",
@@ -943,8 +955,8 @@ mod tests {
         assert_eq!(provider.slug(), "opencode");
         assert_eq!(provider.cli_alias(), "opc");
         assert_eq!(
-            <OpenCode as Provider>::resume_command(&provider, "sid"),
-            "opencode"
+            <OpenCode as Provider>::resume_command(&provider, "ses_sid"),
+            "opencode -s ses_sid"
         );
     }
 
@@ -982,7 +994,8 @@ mod tests {
             )
             .expect("write should succeed");
 
-        assert_eq!(written.resume_command, "opencode");
+        assert!(written.resume_command.starts_with("opencode -s "),
+            "resume_command should include -s flag");
         assert_eq!(written.paths.len(), 1);
         let db_path = written
             .paths
