@@ -957,11 +957,7 @@ fn build_export_json(
             "system" | "tool" => "assistant",
             other => other,
         };
-        let model = msg
-            .author
-            .as_deref()
-            .unwrap_or(model_id)
-            .to_string();
+        let model = msg.author.as_deref().unwrap_or(model_id).to_string();
 
         let mut parts: Vec<serde_json::Value> = Vec::new();
 
@@ -1105,7 +1101,10 @@ fn opencode_import(session_id: &str, export: &serde_json::Value) -> anyhow::Resu
             "opencode import returned non-zero exit — session is SQLite-only"
         );
     } else {
-        info!(session_id, "opencode import succeeded — session is discoverable via `opencode -s`");
+        info!(
+            session_id,
+            "opencode import succeeded — session is discoverable via `opencode -s`"
+        );
     }
 
     // Clean up temp file.

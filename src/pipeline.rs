@@ -571,7 +571,9 @@ but resume may fail until the CLI is installed.",
                         original_messages = canonical.messages.len(),
                         "read-back verification"
                     );
-                    if let Some(detail) = readback_mismatch_detail(&canonical, &readback, target_provider.slug()) {
+                    if let Some(detail) =
+                        readback_mismatch_detail(&canonical, &readback, target_provider.slug())
+                    {
                         warn!(detail, "read-back verification failed");
                         let rollback_detail =
                             match rollback_written_session(target_provider.slug(), &written) {
