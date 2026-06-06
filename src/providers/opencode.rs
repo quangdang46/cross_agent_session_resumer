@@ -593,8 +593,11 @@ impl Provider for OpenCode {
 
         let tx = conn.transaction().context("failed to begin transaction")?;
 
+        // Use INSERT OR REPLACE so retries (after e.g. failed readback
+        // verification) overwrite the stale row instead of hitting a
+        // UNIQUE constraint on session id.
         tx.execute(
-            "INSERT INTO sessions (
+            "INSERT OR REPLACE INTO sessions (
                 id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost,
                 summary_message_id, updated_at, created_at
              ) VALUES (?1, NULL, ?2, ?3, 0, 0, 0.0, NULL, ?4, ?5)",
