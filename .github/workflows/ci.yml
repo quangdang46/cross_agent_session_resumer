@@ -76,7 +76,8 @@ jobs:
             --format json \
             --report-time \
             --show-output \
-            | perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g' \
+            # Strip ANSI CSI sequences (ESC [ params intermediates final-byte) before JSON filtering.
+            | sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g' \
             | awk '/^[[:space:]]*\\{/' \
             | tee test-report.jsonl
         env:
