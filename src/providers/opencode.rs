@@ -124,8 +124,14 @@ impl OpenCode {
             };
         }
 
-        let mut candidates = Vec::new();
-        candidates.extend(Self::cwd_ancestor_db_paths());
+        let cwd_candidates = Self::cwd_ancestor_db_paths();
+        // If a DB exists in the CWD tree, use only that — otherwise we risk
+        // hitting stale casr-created DBs in $HOME that have the old plural
+        // table names (`sessions`/`messages`).
+        if !cwd_candidates.is_empty() {
+            return dedup_existing_files(cwd_candidates);
+        }
+        let mut candidates = cwd_candidates;
         if let Some(home) = dirs::home_dir() {
             candidates.push(home.join(DATA_DIRNAME).join(DB_FILENAME));
         }
@@ -898,6 +904,8 @@ mod tests {
     use crate::providers::Provider;
     use std::sync::{LazyLock, Mutex};
 
+    /// Serializes access to the real `~/.opencode/opencode.db` so that tests
+    /// that write to it don't race against each other.
     static OPENCODE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     struct CwdGuard {
