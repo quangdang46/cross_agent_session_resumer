@@ -994,8 +994,10 @@ mod tests {
             )
             .expect("write should succeed");
 
-        assert!(written.resume_command.starts_with("opencode -s "),
-            "resume_command should include -s flag");
+        assert!(
+            written.resume_command.starts_with("opencode -s "),
+            "resume_command should include -s flag"
+        );
         assert_eq!(written.paths.len(), 1);
         let db_path = written
             .paths
