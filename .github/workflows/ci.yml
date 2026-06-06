@@ -76,7 +76,7 @@ jobs:
             --format json \
             --report-time \
             --show-output \
-            | sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' \
+            | perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g' \
             | awk '/^[[:space:]]*\\{/' \
             | tee test-report.jsonl
         env:
