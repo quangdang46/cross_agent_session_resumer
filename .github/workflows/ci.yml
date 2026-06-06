@@ -76,7 +76,8 @@ jobs:
             --format json \
             --report-time \
             --show-output \
-            | grep -E '^[[:space:]]*\\{' \
+            | sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' \
+            | awk '/^[[:space:]]*\\{/' \
             | tee test-report.jsonl
         env:
           NO_COLOR: "1"
