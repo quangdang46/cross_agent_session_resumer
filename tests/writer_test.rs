@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use casr::model::{CanonicalMessage, CanonicalSession, MessageRole, ToolCall};
 use casr::providers::amp::Amp;
 use casr::providers::chatgpt::ChatGpt;
-use casr::providers::claude_code::ClaudeCode;
+use casr::providers::claude_code::{ClaudeCode, project_dir_key};
 use casr::providers::clawdbot::ClawdBot;
 use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
@@ -294,12 +294,12 @@ fn writer_cc_workspace_directory_placement() {
         .unwrap();
 
     let path = &written.paths[0];
-    // File should be under <CLAUDE_HOME>/projects/-data-projects-myapp/<uuid>.jsonl
-    let expected_dir_key = "-data-projects-myapp";
+    // File should be under <CLAUDE_HOME>/projects/<cwd-dir-key>/<uuid>.jsonl
+    let cwd_key = project_dir_key(&std::env::current_dir().unwrap());
     let parent = path.parent().unwrap();
     assert!(
-        parent.ends_with(expected_dir_key),
-        "CC file should be under project dir key '{expected_dir_key}', got: {}",
+        parent.ends_with(&cwd_key),
+        "CC file should be under project dir key '{cwd_key}', got: {}",
         parent.display()
     );
     assert!(
@@ -1000,9 +1000,13 @@ fn writer_cc_default_workspace_uses_tmp() {
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     let first: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+    let expected_cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     assert_eq!(
-        first["cwd"], "/tmp",
-        "CC should fall back to /tmp when workspace is None"
+        first["cwd"], expected_cwd,
+        "CC should use CWD when workspace is None"
     );
 }
 

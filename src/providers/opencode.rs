@@ -126,18 +126,22 @@ impl OpenCode {
         }
 
         let cwd_candidates = Self::cwd_ancestor_db_paths();
-        // If a DB exists in the CWD tree, use only that — otherwise we risk
-        // hitting stale casr-created DBs in $HOME that have the old plural
-        // table names (`sessions`/`messages`).
-        if !cwd_candidates.is_empty() {
-            return dedup_existing_files(cwd_candidates);
+        let cwd_existing = dedup_existing_files(cwd_candidates);
+        if !cwd_existing.is_empty() {
+            return cwd_existing;
         }
-        let mut candidates = cwd_candidates;
+
+        // No existing DB in CWD tree — check global paths including the main
+        // opencode DB (typically ~/.local/share/opencode/opencode.db).
+        let mut candidates = Vec::new();
         if let Some(home) = dirs::home_dir() {
             candidates.push(home.join(DATA_DIRNAME).join(DB_FILENAME));
         }
         for data_dir in Self::configured_data_dirs() {
             candidates.push(data_dir.join(DB_FILENAME));
+        }
+        if let Some(main_db) = find_main_opencode_db_path() {
+            candidates.push(main_db);
         }
 
         dedup_existing_files(candidates)
@@ -274,26 +278,52 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
         Ok(())
     }
 
+    fn has_native_opencode_schema(conn: &Connection) -> bool {
+        Self::table_exists(conn, "session")
+            && Self::table_exists(conn, "message")
+            && Self::table_exists(conn, "part")
+    }
+
     fn session_exists(conn: &Connection, session_id: &str) -> bool {
-        if !Self::table_exists(conn, "sessions") {
-            return false;
+        if Self::table_exists(conn, "sessions")
+            && conn
+                .prepare("SELECT 1 FROM sessions WHERE id = ?1 LIMIT 1")
+                .and_then(|mut stmt| stmt.exists(rusqlite::params![session_id]))
+                .unwrap_or(false)
+        {
+            return true;
         }
-        conn.prepare("SELECT 1 FROM sessions WHERE id = ?1 LIMIT 1")
-            .and_then(|mut stmt| stmt.exists(rusqlite::params![session_id]))
-            .unwrap_or(false)
+        if Self::has_native_opencode_schema(conn)
+            && conn
+                .prepare("SELECT 1 FROM session WHERE id = ?1 LIMIT 1")
+                .and_then(|mut stmt| stmt.exists(rusqlite::params![session_id]))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+        false
     }
 
     fn newest_root_session_id(conn: &Connection) -> Option<String> {
-        if !Self::table_exists(conn, "sessions") {
-            return None;
+        if Self::table_exists(conn, "sessions")
+            && let Ok(id) = conn.query_row(
+                "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        {
+            return Some(id);
         }
-
-        conn.query_row(
-            "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .ok()
+        if Self::has_native_opencode_schema(conn)
+            && let Ok(id) = conn.query_row(
+                "SELECT id FROM session ORDER BY time_created DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        {
+            return Some(id);
+        }
+        None
     }
 
     fn workspace_from_db_path(db_path: &Path) -> Option<PathBuf> {
@@ -309,6 +339,10 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
         db_path: &Path,
         session_id: &str,
     ) -> anyhow::Result<CanonicalSession> {
+        // Dispatch to native schema reader if present
+        if Self::has_native_opencode_schema(conn) && !Self::table_exists(conn, "sessions") {
+            return Self::read_native_session_by_id(conn, db_path, session_id);
+        }
         if !Self::table_exists(conn, "sessions") {
             anyhow::bail!("OpenCode DB has no sessions table: {}", db_path.display());
         }
@@ -420,6 +454,28 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
 
         reindex_messages(&mut messages);
 
+        trace!(
+            message_count = messages.len(),
+            role_counts = ?model_counts,
+            "OpenCode session read-back complete"
+        );
+
+        // Log role distribution for debugging read-back mismatches.
+        {
+            let mut role_counts: HashMap<&'static str, usize> = HashMap::new();
+            for m in &messages {
+                let label = match m.role {
+                    MessageRole::User => "user",
+                    MessageRole::Assistant => "assistant",
+                    MessageRole::Tool => "tool",
+                    MessageRole::System => "system",
+                    MessageRole::Other(_) => "other",
+                };
+                *role_counts.entry(label).or_insert(0) += 1;
+            }
+            trace!(?role_counts, "OpenCode read-back role distribution");
+        }
+
         let title = (!title_raw.trim().is_empty())
             .then_some(title_raw)
             .or_else(|| {
@@ -460,6 +516,286 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "cost": cost,
+            }),
+            source_path: source,
+            model_name,
+        })
+    }
+
+    /// Read a session from the native opencode schema (`session`/`message`/`part` tables).
+    ///
+    /// This handles the schema used by opencode v1.16.2's main DB at
+    /// `~/.local/share/opencode/opencode.db`, which differs from casr's
+    /// own schema (`sessions`/`messages`/`files`).
+    fn read_native_session_by_id(
+        conn: &Connection,
+        db_path: &Path,
+        session_id: &str,
+    ) -> anyhow::Result<CanonicalSession> {
+        let (title_raw, model_json, directory, created_raw, updated_raw): (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT title, model, directory, time_created, time_updated
+                 FROM session
+                 WHERE id = ?1
+                 LIMIT 1",
+                rusqlite::params![session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "native session '{session_id}' not found in {}",
+                    db_path.display()
+                )
+            })?;
+
+        let started_at = parse_timestamp(&serde_json::Value::from(created_raw));
+        let mut ended_at = parse_timestamp(&serde_json::Value::from(updated_raw)).or(started_at);
+
+        let native_model_name = model_json
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .and_then(|v| {
+                v.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .filter(|n| !n.is_empty());
+
+        let mut model_counts: HashMap<String, usize> = HashMap::new();
+        let mut messages = Vec::new();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, data, time_created
+                 FROM message
+                 WHERE session_id = ?1
+                 ORDER BY time_created ASC, id ASC",
+            )
+            .context("failed to prepare native message query")?;
+
+        let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (native_message_id, data_json, msg_created_raw) = row?;
+
+            let data: serde_json::Value =
+                serde_json::from_str(&data_json).unwrap_or_else(|_| serde_json::json!({}));
+
+            let role_str = data
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("user");
+            let role = normalize_role(role_str);
+
+            let timestamp = data
+                .get("time")
+                .and_then(|t| t.get("created"))
+                .and_then(serde_json::Value::as_i64)
+                .or(Some(msg_created_raw));
+            if let Some(ts) = timestamp {
+                ended_at = Some(ended_at.map_or(ts, |current| current.max(ts)));
+            }
+
+            let msg_model_raw = data
+                .get("modelID")
+                .and_then(serde_json::Value::as_str)
+                .filter(|m| !m.is_empty())
+                .or_else(|| {
+                    data.get("model")
+                        .and_then(|m| m.get("modelID"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|m| !m.is_empty())
+                });
+            if let Some(model_name) = msg_model_raw {
+                *model_counts.entry(model_name.to_string()).or_insert(0) += 1;
+            }
+
+            let mut text_chunks: Vec<String> = Vec::new();
+            let mut reasoning_chunks: Vec<String> = Vec::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut tool_results: Vec<ToolResult> = Vec::new();
+
+            let mut part_stmt = conn
+                .prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY id ASC")
+                .context("failed to prepare part query")?;
+
+            let part_rows = part_stmt.query_map(rusqlite::params![native_message_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+
+            for part_row in part_rows {
+                let part_json_str = part_row?;
+                let Ok(part_data) = serde_json::from_str::<serde_json::Value>(&part_json_str)
+                else {
+                    continue;
+                };
+
+                let part_type = part_data
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+
+                match part_type {
+                    "text" => {
+                        if let Some(text) =
+                            part_data.get("text").and_then(serde_json::Value::as_str)
+                            && !text.trim().is_empty()
+                        {
+                            text_chunks.push(text.to_string());
+                        }
+                    }
+                    "reasoning" => {
+                        if let Some(text) =
+                            part_data.get("text").and_then(serde_json::Value::as_str)
+                            && !text.trim().is_empty()
+                        {
+                            reasoning_chunks.push(text.to_string());
+                        }
+                    }
+                    "tool" => {
+                        let state = part_data.get("state");
+                        let status = state
+                            .and_then(|s| s.get("status"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        let call_id = part_data
+                            .get("callID")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToString::to_string);
+                        let tool_name = part_data
+                            .get("tool")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool")
+                            .to_string();
+
+                        match status {
+                            "pending" | "running" => {
+                                let input = state
+                                    .and_then(|s| s.get("input"))
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                tool_calls.push(ToolCall {
+                                    id: call_id,
+                                    name: tool_name,
+                                    arguments: input,
+                                });
+                            }
+                            "completed" => {
+                                let output = state
+                                    .and_then(|s| s.get("output"))
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                tool_results.push(ToolResult {
+                                    call_id,
+                                    content: output,
+                                    is_error: false,
+                                });
+                            }
+                            "error" => {
+                                let error = state
+                                    .and_then(|s| s.get("error"))
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                tool_results.push(ToolResult {
+                                    call_id,
+                                    content: error,
+                                    is_error: true,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let content = if text_chunks.is_empty() {
+                reasoning_chunks.join("\n")
+            } else {
+                text_chunks.join("\n")
+            };
+            let content = content.trim().to_string();
+
+            messages.push(CanonicalMessage {
+                idx: 0,
+                role,
+                content,
+                timestamp,
+                author: data
+                    .get("agent")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                tool_calls,
+                tool_results,
+                extra: serde_json::json!({
+                    "opencode_message_id": native_message_id,
+                    "opencode_native_data": data,
+                }),
+            });
+        }
+
+        reindex_messages(&mut messages);
+
+        trace!(
+            message_count = messages.len(),
+            "OpenCode native session read-back complete"
+        );
+
+        let title = (!title_raw.trim().is_empty())
+            .then_some(title_raw)
+            .or_else(|| {
+                messages
+                    .iter()
+                    .find(|m| m.role == MessageRole::User)
+                    .map(|m| truncate_title(&m.content, 80))
+                    .filter(|t| !t.is_empty())
+            });
+
+        let model_name = model_counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(name, _)| name)
+            .or(native_model_name);
+
+        let workspace = directory.filter(|d| !d.is_empty()).map(PathBuf::from);
+
+        let source = Self::virtual_session_path(db_path, session_id);
+
+        let canonical_session_id = ensure_ses_prefix(session_id);
+
+        Ok(CanonicalSession {
+            session_id: canonical_session_id,
+            provider_slug: "opencode".to_string(),
+            workspace,
+            title,
+            started_at: Some(created_raw),
+            ended_at,
+            messages,
+            metadata: serde_json::json!({
+                "opencode_db": db_path.display().to_string(),
+                "native_schema": true,
             }),
             source_path: source,
             model_name,
@@ -592,91 +928,43 @@ impl Provider for OpenCode {
             .context("failed to delete existing OpenCode session for --force")?;
         }
 
-        let tx = conn.transaction().context("failed to begin transaction")?;
-
-        // Use INSERT OR REPLACE so retries (after e.g. failed readback
-        // verification) overwrite the stale row instead of hitting a
-        // UNIQUE constraint on session id.
-        tx.execute(
-            "INSERT OR REPLACE INTO sessions (
-                id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost,
-                summary_message_id, updated_at, created_at
-             ) VALUES (?1, NULL, ?2, ?3, 0, 0, 0.0, NULL, ?4, ?5)",
-            rusqlite::params![
-                target_session_id,
-                title,
-                if has_count_trigger {
-                    0_i64
-                } else {
-                    i64::try_from(session.messages.len()).unwrap_or(i64::MAX)
-                },
-                updated_at,
-                created_at,
-            ],
-        )
-        .context("failed to insert OpenCode session")?;
-
-        let default_model = session.model_name.clone();
-        // OpenCode reads messages back in `(created_at ASC, id ASC)` order. The
-        // random UUID `id` would shuffle messages when several share the same
-        // timestamp (which happens whenever the source format — e.g. Cline's
-        // `api_conversation_history.json` — does not record per-message
-        // timestamps). Use a synthetic +1ms step so the read-back order
-        // matches the write order.
-        let mut synthetic_ts = created_at;
-        for msg in &session.messages {
-            let message_id = uuid::Uuid::new_v4().to_string();
-            let parts = build_parts(msg);
-            let parts_json =
-                serde_json::to_string(&parts).context("failed to serialize OpenCode parts")?;
-            let timestamp = match msg.timestamp {
-                Some(ts) => ts,
-                None => {
-                    let t = synthetic_ts;
-                    synthetic_ts = synthetic_ts.saturating_add(1);
-                    t
-                }
-            };
-            let model = msg
-                .author
-                .clone()
-                .or_else(|| default_model.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-
+        // --- Phase 1: Create session row (unconditional) ---
+        // Session must exist in SQLite before opencode import can reference it
+        // via foreign key. Committed immediately so the subprocess sees it.
+        // Explicitly delete any existing messages first — the FK cascade from
+        // INSERT OR REPLACE is not guaranteed to fire on all SQLite versions
+        // when foreign_keys = ON is set per-connection.
+        {
+            let tx = conn.transaction().context("failed to begin transaction")?;
             tx.execute(
-                "INSERT INTO messages (
-                    id, session_id, role, parts, model, created_at, updated_at, finished_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                "DELETE FROM messages WHERE session_id = ?1",
+                rusqlite::params![target_session_id],
+            )
+            .context("failed to delete existing messages for session")?;
+            tx.execute(
+                "INSERT OR REPLACE INTO sessions (
+                    id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost,
+                    summary_message_id, updated_at, created_at
+                 ) VALUES (?1, NULL, ?2, ?3, 0, 0, 0.0, NULL, ?4, ?5)",
                 rusqlite::params![
-                    message_id,
                     target_session_id,
-                    role_to_opencode(&msg.role),
-                    parts_json,
-                    model,
-                    timestamp,
-                    timestamp,
+                    title,
+                    if has_count_trigger {
+                        0_i64
+                    } else {
+                        i64::try_from(session.messages.len()).unwrap_or(i64::MAX)
+                    },
+                    updated_at,
+                    created_at,
                 ],
             )
-            .with_context(|| format!("failed to insert OpenCode message {}", msg.idx))?;
+            .context("failed to insert OpenCode session")?;
+            tx.commit()
+                .context("failed to commit session transaction")?;
         }
 
-        // If the DB has no count trigger, set message_count explicitly.
-        if !has_count_trigger {
-            tx.execute(
-                "UPDATE sessions SET message_count = ?1 WHERE id = ?2",
-                rusqlite::params![
-                    i64::try_from(session.messages.len()).unwrap_or(i64::MAX),
-                    target_session_id
-                ],
-            )
-            .context("failed to update OpenCode session message_count")?;
-        }
-
-        tx.commit().context("failed to commit transaction")?;
-
-        // Register the session in OpenCode's event/snapshot store so
-        // `opencode -s <id>` can find it. Falls back silently if the
-        // `opencode` CLI is not installed.
+        // --- Phase 2: Build export JSON ---
+        let default_model = session.model_name.clone();
         let export = build_export_json(
             &target_session_id,
             &title,
@@ -686,9 +974,128 @@ impl Provider for OpenCode {
             updated_at,
             &session.messages,
         );
-        match opencode_import(&target_session_id, &export) {
-            Ok(()) => {}
-            Err(e) => warn!(error = %e, "opencode import warning (session is still in SQLite)"),
+
+        // --- Phase 2.5: Clean main opencode DB before import ---
+        // The main opencode DB (typically ~/.local/share/opencode/opencode.db)
+        // is where `opencode import` writes. Without cleanup, repeated imports
+        // of the same session accumulate duplicate message rows with stale
+        // model names, causing `model: "unknown"` in the UI.
+        if let Some(main_db_path) = find_main_opencode_db_path()
+            && main_db_path != db_path
+        {
+            if let Ok(ref main_conn) = Connection::open_with_flags(
+                &main_db_path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ) {
+                main_conn
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .ok();
+                if let Err(e) = clean_main_opencode_db_session(main_conn, &target_session_id) {
+                    warn!(
+                        error = %e,
+                        session_id = &target_session_id,
+                        "failed to clean main opencode DB — import may accumulate duplicates"
+                    );
+                }
+            } else {
+                warn!(
+                    path = %main_db_path.display(),
+                    "could not open main opencode DB for cleanup"
+                );
+            }
+        }
+
+        // --- Phase 3: Run opencode import for event-store registration ---
+        // The import registers the session so `opencode -s <id>` can discover
+        // it. It may also write message rows with incorrect roles — we delete
+        // any such rows from our DB in the next phase and replace them with
+        // authoritative per-message INSERTs.
+        let _ = opencode_import(&target_session_id, &export);
+
+        // --- Phase 4: Remove any messages the import may have written ---
+        // The import targets opencode's default DB (possibly different from
+        // ours). If it wrote to our DB, these DELETE/INSERT ensure correct
+        // data. If not, the DELETE is a no-op.
+        let _ = conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            rusqlite::params![target_session_id],
+        );
+
+        // --- Phase 5: Per-message INSERT (authoritative data) ---
+        {
+            let tx = conn.transaction().context("failed to begin transaction")?;
+            let mut synthetic_ts = created_at;
+            for msg in &session.messages {
+                let message_id = uuid::Uuid::new_v4().to_string();
+                let parts = build_parts(msg);
+                let parts_json =
+                    serde_json::to_string(&parts).context("failed to serialize OpenCode parts")?;
+                let timestamp = match msg.timestamp {
+                    Some(ts) => ts,
+                    None => {
+                        let t = synthetic_ts;
+                        synthetic_ts = synthetic_ts.saturating_add(1);
+                        t
+                    }
+                };
+                let model = msg
+                    .author
+                    .clone()
+                    .or_else(|| default_model.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                tx.execute(
+                    "INSERT INTO messages (
+                        id, session_id, role, parts, model, created_at, updated_at, finished_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                    rusqlite::params![
+                        message_id,
+                        target_session_id,
+                        role_to_opencode(&msg.role),
+                        parts_json,
+                        model,
+                        timestamp,
+                        timestamp,
+                    ],
+                )
+                .with_context(|| format!("failed to insert OpenCode message {}", msg.idx))?;
+            }
+
+            // If the DB has no count trigger, set message_count explicitly.
+            if !has_count_trigger {
+                tx.execute(
+                    "UPDATE sessions SET message_count = ?1 WHERE id = ?2",
+                    rusqlite::params![
+                        i64::try_from(session.messages.len()).unwrap_or(i64::MAX),
+                        target_session_id
+                    ],
+                )
+                .context("failed to update OpenCode session message_count")?;
+            }
+
+            tx.commit()
+                .context("failed to commit message transaction")?;
+
+            // Trace the roles that were actually written — helps debug
+            // read-back verification mismatches.
+            {
+                let mut role_stmt = conn
+                    .prepare(
+                        "SELECT role, COUNT(*) FROM messages WHERE session_id = ?1 GROUP BY role",
+                    )
+                    .context("failed to prepare role stats query")?;
+                let role_stats: Vec<(String, i64)> = role_stmt
+                    .query_map(rusqlite::params![target_session_id], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .context("failed to query role stats")?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                trace!(
+                    ?role_stats,
+                    "OpenCode session role distribution after write"
+                );
+            }
         }
 
         let virtual_path = Self::virtual_session_path(&db_path, &target_session_id);
@@ -725,22 +1132,27 @@ impl Provider for OpenCode {
             let Ok(conn) = Self::open_db(db_path) else {
                 continue;
             };
-            if !Self::table_exists(&conn, "sessions") {
-                continue;
+
+            if Self::table_exists(&conn, "sessions")
+                && let Ok(mut stmt) =
+                    conn.prepare("SELECT id FROM sessions ORDER BY created_at DESC")
+                && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0))
+            {
+                for row in rows.flatten() {
+                    let virtual_path = Self::virtual_session_path(db_path, &row);
+                    results.push((row, virtual_path));
+                }
             }
 
-            let Ok(mut stmt) = conn.prepare("SELECT id FROM sessions ORDER BY created_at DESC")
-            else {
-                continue;
-            };
-
-            let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
-                continue;
-            };
-
-            for row in rows.flatten() {
-                let virtual_path = Self::virtual_session_path(db_path, &row);
-                results.push((row, virtual_path));
+            if Self::has_native_opencode_schema(&conn)
+                && let Ok(mut stmt) =
+                    conn.prepare("SELECT id FROM session ORDER BY time_created DESC")
+                && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0))
+            {
+                for row in rows.flatten() {
+                    let virtual_path = Self::virtual_session_path(db_path, &row);
+                    results.push((row, virtual_path));
+                }
             }
         }
 
@@ -1122,6 +1534,77 @@ fn build_export_json(
         },
         "messages": export_messages,
     })
+}
+
+/// Find the main opencode database path (the global one used by the opencode CLI).
+///
+/// This is typically at `~/.local/share/opencode/opencode.db` (XDG default)
+/// or wherever `data.directory` is configured in opencode's config.
+/// Returns `None` if no existing main DB is found.
+fn find_main_opencode_db_path() -> Option<PathBuf> {
+    // Check XDG_DATA_HOME env var
+    if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME")
+        && !xdg_data.trim().is_empty()
+    {
+        let path = PathBuf::from(xdg_data).join("opencode").join(DB_FILENAME);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    // Default XDG path: ~/.local/share/opencode/opencode.db
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".local/share/opencode").join(DB_FILENAME);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    // Check config-defined data directories
+    for data_dir in OpenCode::configured_data_dirs() {
+        let path = data_dir.join(DB_FILENAME);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Clean a session from the main opencode database before re-importing.
+///
+/// `opencode import` always appends — without this cleanup, repeated imports
+/// accumulate duplicate message rows with stale model names.
+fn clean_main_opencode_db_session(conn: &Connection, session_id: &str) -> anyhow::Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .context("failed to enable foreign keys")?;
+
+    conn.execute(
+        "DELETE FROM part WHERE session_id = ?1",
+        rusqlite::params![session_id],
+    )
+    .context("failed to clean parts from main opencode DB")?;
+
+    conn.execute(
+        "DELETE FROM session_message WHERE session_id = ?1",
+        rusqlite::params![session_id],
+    )
+    .context("failed to clean session_messages from main opencode DB")?;
+
+    conn.execute(
+        "DELETE FROM message WHERE session_id = ?1",
+        rusqlite::params![session_id],
+    )
+    .context("failed to clean messages from main opencode DB")?;
+
+    conn.execute(
+        "DELETE FROM session WHERE id = ?1",
+        rusqlite::params![session_id],
+    )
+    .context("failed to clean session from main opencode DB")?;
+
+    debug!(session_id, "cleaned session from main opencode database");
+    Ok(())
 }
 
 /// Run `opencode import` on the export JSON to register the session in OpenCode's

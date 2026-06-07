@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use tracing::{debug, info, trace, warn};
 use walkdir::WalkDir;
 
@@ -539,6 +540,8 @@ impl Codex {
 
         let mut session_id: Option<String> = None;
         let mut workspace: Option<PathBuf> = None;
+        let mut model_provider: Option<String> = None;
+        let mut turn_context_models: HashMap<String, usize> = HashMap::new();
         let mut started_at: Option<i64> = None;
         let mut ended_at: Option<i64> = None;
         let mut messages: Vec<CanonicalMessage> = Vec::new();
@@ -586,6 +589,12 @@ impl Codex {
                         }
                         if workspace.is_none() {
                             workspace = p.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
+                        }
+                        if model_provider.is_none() {
+                            model_provider = p
+                                .get("model_provider")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
                         }
                     }
                 }
@@ -721,6 +730,19 @@ impl Codex {
                         }
                     }
                 }
+                "turn_context" => {
+                    if let Some(p) = payload
+                        && let Some(model) = p.get("model").and_then(|v| v.as_str())
+                        && !model.is_empty()
+                    {
+                        // Strip provider prefix (e.g., "ocg/deepseek-v4-flash" → "deepseek-v4-flash")
+                        // so the model name matches opencode's built-in model registry.
+                        let clean_model = model.split('/').next_back().unwrap_or(model);
+                        *turn_context_models
+                            .entry(clean_model.to_string())
+                            .or_insert(0) += 1;
+                    }
+                }
                 "compacted" => {
                     // A compaction event replaces all accumulated history with a
                     // condensed `replacement_history` snapshot — the source
@@ -805,8 +827,26 @@ impl Codex {
         }
 
         reindex_messages(&mut messages);
+
+        // Prefer the most frequent model name from turn_context events over model_provider.
+        // The provider prefix (e.g., "ocg/") is stripped during extraction so the bare model
+        // name matches opencode's built-in model registry.
+        // model_provider is the router/proxy name (e.g. "9router").
+        let resolved_model = turn_context_models
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(name, _)| name)
+            .or(model_provider);
+
         self.build_session(
-            path, session_id, workspace, started_at, ended_at, messages, skipped,
+            path,
+            session_id,
+            workspace,
+            resolved_model,
+            started_at,
+            ended_at,
+            messages,
+            skipped,
         )
     }
 
@@ -867,7 +907,7 @@ impl Codex {
 
         reindex_messages(&mut messages);
         self.build_session(
-            path, session_id, workspace, started_at, ended_at, messages, 0,
+            path, session_id, workspace, None, started_at, ended_at, messages, 0,
         )
     }
 
@@ -881,6 +921,7 @@ impl Codex {
         path: &Path,
         session_id: Option<String>,
         workspace: Option<PathBuf>,
+        model_provider: Option<String>,
         started_at: Option<i64>,
         ended_at: Option<i64>,
         messages: Vec<CanonicalMessage>,
@@ -927,7 +968,7 @@ impl Codex {
             messages,
             metadata: serde_json::Value::Object(metadata),
             source_path: path.to_path_buf(),
-            model_name: None,
+            model_name: model_provider,
         })
     }
 }

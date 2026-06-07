@@ -5,7 +5,7 @@
 //! trait — concrete providers are wired in via the registry.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -780,7 +780,21 @@ turn(s) between the task and the most recent history."
 ///
 /// This function maps every role to a small set of equivalence classes so the
 /// verification comparison is tolerant of this expected lossy round-trip.
-fn readback_role_bucket(role: &MessageRole) -> &'static str {
+fn readback_role_bucket(role: &MessageRole, provider_slug: &str) -> &'static str {
+    // OpenCode only supports User and Assistant roles.  Its writer maps
+    // System/Tool/Other messages to "assistant" during export; the reader
+    // then parses them back as `Assistant`.  Map those roles to the
+    // "assistant" bucket so the read-back comparison is consistent.
+    if provider_slug == "opencode" {
+        return match role {
+            MessageRole::Assistant
+            | MessageRole::System
+            | MessageRole::Tool
+            | MessageRole::Other(_) => "assistant",
+            MessageRole::User => "user",
+        };
+    }
+
     match role {
         MessageRole::Assistant => "assistant",
         // Everything else collapses into the "user" bucket because that is
@@ -805,24 +819,50 @@ fn readback_mismatch_detail(
         ));
     }
 
+    // OpenCode stores messages in SQLite and reads them back ordered by
+    // `(created_at ASC, id ASC)`. When source timestamps are non-monotonic or
+    // when synthetic timestamps are used, read-back order can differ from the
+    // canonical order. Compare aggregate role bucket distributions instead of
+    // per-position roles to avoid spurious positional mismatches.
+    if provider_slug == "opencode" {
+        let mut orig_buckets: HashMap<&str, usize> = HashMap::new();
+        let mut rb_buckets: HashMap<&str, usize> = HashMap::new();
+        for msg in &canonical.messages {
+            *orig_buckets
+                .entry(readback_role_bucket(&msg.role, "opencode"))
+                .or_insert(0) += 1;
+        }
+        for msg in &readback.messages {
+            *rb_buckets
+                .entry(readback_role_bucket(&msg.role, "opencode"))
+                .or_insert(0) += 1;
+        }
+        if orig_buckets != rb_buckets {
+            return Some(format!(
+                "role bucket mismatch: original {:?}, read back {:?}",
+                orig_buckets, rb_buckets
+            ));
+        }
+        // Content comparison is skipped for OpenCode — the build_parts/
+        // parse_parts roundtrip is inherently lossy.
+        return None;
+    }
+
     for (i, (orig, rb)) in canonical
         .messages
         .iter()
         .zip(readback.messages.iter())
         .enumerate()
     {
-        if readback_role_bucket(&orig.role) != readback_role_bucket(&rb.role) {
+        let orig_bucket = readback_role_bucket(&orig.role, provider_slug);
+        let rb_bucket = readback_role_bucket(&rb.role, provider_slug);
+        if orig_bucket != rb_bucket {
             return Some(format!(
                 "message role mismatch at idx {i}: wrote {:?}, read back {:?}",
                 orig.role, rb.role
             ));
         }
-        // OpenCode stores content as JSON parts in SQLite. The build_parts/
-        // parse_parts roundtrip is inherently lossy (JSON serialization can
-        // differ from the original text representation, especially for content
-        // that includes structured data or tool results). Skip content
-        // comparison for OpenCode to avoid false positives.
-        if provider_slug != "opencode" && orig.content != rb.content {
+        if orig.content != rb.content {
             return Some(format!(
                 "message content mismatch at idx {i}: wrote {} bytes, read back {} bytes",
                 orig.content.len(),
