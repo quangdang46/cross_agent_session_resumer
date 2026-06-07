@@ -179,9 +179,14 @@ fn writer_cc_roundtrip() {
             "CC roundtrip msg {i}: content mismatch"
         );
     }
+    // CC write_session uses CWD (not source session workspace) to derive the
+    // project directory key, so `claude --resume` can find the session from
+    // the same CWD. Therefore readback.workspace will be the CWD, not the
+    // source session's workspace path.
     assert_eq!(
-        readback.workspace, session.workspace,
-        "CC roundtrip: workspace"
+        readback.workspace,
+        std::env::current_dir().ok(),
+        "CC roundtrip: workspace should match CWD"
     );
     assert!(
         readback.model_name.is_some(),

@@ -637,7 +637,11 @@ impl Provider for OpenCode {
                     t
                 }
             };
-            let model = msg.author.clone().or_else(|| default_model.clone());
+            let model = msg
+                .author
+                .clone()
+                .or_else(|| default_model.clone())
+                .unwrap_or_else(|| "unknown".to_string());
 
             tx.execute(
                 "INSERT INTO messages (
@@ -957,7 +961,13 @@ fn build_export_json(
             "system" | "tool" => "assistant",
             other => other,
         };
-        let model = msg.author.as_deref().unwrap_or(model_id).to_string();
+        let model = msg
+            .author
+            .as_deref()
+            .or(Some(model_id))
+            .filter(|m| !m.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
 
         let mut parts: Vec<serde_json::Value> = Vec::new();
 
@@ -972,27 +982,28 @@ fn build_export_json(
             }));
         }
 
-        // Tool call parts.
+        // Tool call parts (pending state).
         for tc in &msg.tool_calls {
-            let input: serde_json::Value = tc
+            let tc_input: serde_json::Value = tc
                 .arguments
                 .as_str()
                 .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(|| tc.arguments.clone());
+                .unwrap_or_else(|| serde_json::json!({"value": tc.arguments}));
             let tc_id = tc.id.clone().unwrap_or_default();
+            let tc_input_obj = match &tc_input {
+                serde_json::Value::Object(_) => tc_input.clone(),
+                _ => serde_json::json!({"value": tc_input}),
+            };
+            let raw_str =
+                serde_json::to_string(&tc.arguments).unwrap_or_else(|_| tc.arguments.to_string());
             parts.push(serde_json::json!({
                 "type": "tool",
                 "tool": tc.name,
                 "callID": tc_id,
                 "state": {
-                    "status": "success",
-                    "input": input,
-                    "output": "",
-                    "metadata": "",
-                    "time": {
-                        "start": ts,
-                        "end": ts,
-                    },
+                    "status": "pending",
+                    "input": tc_input_obj,
+                    "raw": raw_str,
                 },
                 "id": format!("prt_{}", uuid::Uuid::new_v4()),
                 "sessionID": target_session_id,
@@ -1000,45 +1011,93 @@ fn build_export_json(
             }));
         }
 
-        // Tool result parts.
+        // Tool result parts (completed or error state).
         for tr in &msg.tool_results {
             let call_id = tr.call_id.clone().unwrap_or_default();
-            parts.push(serde_json::json!({
-                "type": "tool",
-                "tool": "tool_result",
-                "callID": call_id,
-                "state": {
-                    "status": "success",
-                    "input": serde_json::Value::Null,
-                    "output": tr.content,
-                    "metadata": "",
-                    "time": {
-                        "start": ts,
-                        "end": ts,
+            if tr.is_error {
+                parts.push(serde_json::json!({
+                    "type": "tool",
+                    "tool": "tool_result",
+                    "callID": call_id,
+                    "state": {
+                        "status": "error",
+                        "input": serde_json::Value::Object(serde_json::Map::new()),
+                        "error": tr.content,
+                        "metadata": serde_json::Value::Object(serde_json::Map::new()),
+                        "time": {
+                            "start": ts,
+                            "end": ts,
+                        },
                     },
-                },
-                "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                "sessionID": target_session_id,
-                "messageID": msg_id,
-            }));
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            } else {
+                parts.push(serde_json::json!({
+                    "type": "tool",
+                    "tool": "tool_result",
+                    "callID": call_id,
+                    "state": {
+                        "status": "completed",
+                        "input": serde_json::Value::Object(serde_json::Map::new()),
+                        "output": tr.content,
+                        "title": "tool_result",
+                        "metadata": serde_json::Value::Object(serde_json::Map::new()),
+                        "time": {
+                            "start": ts,
+                            "end": ts,
+                        },
+                    },
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            }
         }
 
-        let mut msg_info = serde_json::json!({
-            "role": role,
-            "time": { "created": ts },
-            "id": msg_id,
-            "sessionID": target_session_id,
-            "agent": model,
-            "model": {
-                "providerID": role,
+        // Native OpenCode uses different schemas for User and Assistant
+        // messages.  User messages nest model info in a "model" object;
+        // Assistant messages require modelID, providerID, parentID, mode,
+        // path, cost, and tokens at the top level.
+        let msg_info = if role == "user" {
+            serde_json::json!({
+                "role": "user",
+                "time": { "created": ts },
+                "id": msg_id,
+                "sessionID": target_session_id,
+                "agent": model,
+                "model": {
+                    "providerID": "unknown",
+                    "modelID": model,
+                },
+                "summary": { "diffs": [] },
+            })
+        } else {
+            let workspace_str = workspace.to_string_lossy().to_string();
+            serde_json::json!({
+                "role": "assistant",
+                "time": { "created": ts },
+                "id": msg_id,
+                "sessionID": target_session_id,
+                "agent": model,
+                "parentID": prev_msg_id.as_ref().unwrap_or(&msg_id),
                 "modelID": model,
-            },
-            "summary": { "diffs": [] },
-        });
-        // Native OpenCode uses parentID to link messages into a reply chain.
-        if let Some(ref prev) = prev_msg_id {
-            msg_info["parentID"] = serde_json::json!(prev);
-        }
+                "providerID": "unknown",
+                "mode": "code",
+                "path": {
+                    "cwd": workspace_str,
+                    "root": workspace_str,
+                },
+                "cost": 0,
+                "tokens": {
+                    "input": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                    "cache": { "read": 0, "write": 0 },
+                },
+            })
+        };
         prev_msg_id = Some(msg_id.clone());
 
         export_messages.push(serde_json::json!({
@@ -1881,5 +1940,47 @@ mod tests {
 
         let listed = OpenCode.list_sessions().expect("should return Some");
         assert!(listed.is_empty(), "empty DB should have no sessions");
+    }
+
+    #[test]
+    fn build_export_json_sets_parentid_on_first_assistant_message() {
+        // System role gets mapped to "assistant" during export. The opencode
+        // Assistant schema requires parentID, so it must be set even on the
+        // very first message (when there is no previous message to link to).
+        let workspace = Path::new("/tmp");
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::System,
+            content: "You are a helpful assistant.".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::json!({}),
+        };
+
+        let export = build_export_json(
+            "ses_test-123",
+            "Test",
+            "gpt-4",
+            workspace,
+            1_700_000_000_000,
+            1_700_000_010_000,
+            &[msg],
+        );
+
+        let messages = export["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        let info = &messages[0]["info"];
+        assert_eq!(info["role"], "assistant");
+        assert!(
+            info.get("parentID").is_some(),
+            "parentID should be present on assistant-role messages even for the first message"
+        );
+        let parent_id = info["parentID"].as_str().unwrap();
+        assert!(
+            parent_id.starts_with("msg_"),
+            "parentID should be a valid MessageID starting with msg_, got: {parent_id}"
+        );
     }
 }

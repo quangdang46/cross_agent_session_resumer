@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use casr::model::{CanonicalMessage, CanonicalSession, MessageRole, ToolCall, ToolResult};
+use casr::model::CanonicalMessage;
+use casr::model::{CanonicalSession, MessageRole, ToolCall, ToolResult};
+use casr::providers::claude_code::project_dir_key;
 use casr::providers::{Provider, WriteOptions};
 
 // ---------------------------------------------------------------------------
@@ -438,14 +440,15 @@ mod cc_golden {
     }
 
     #[test]
-    fn golden_cc_cwd_matches_workspace() {
+    fn golden_cc_cwd_matches_cwd() {
         let session = simple_session();
         let (_, content) = write_cc_session(&session);
         let first: serde_json::Value =
             serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        let expected_cwd = std::env::current_dir().unwrap();
         assert_eq!(
             first["cwd"].as_str().unwrap(),
-            session.workspace.unwrap().to_string_lossy()
+            expected_cwd.to_string_lossy()
         );
     }
 
@@ -573,8 +576,9 @@ mod cc_golden {
     fn golden_cc_path_includes_project_dir_key() {
         let (path, _) = write_cc_session(&simple_session());
         let path_str = path.to_string_lossy();
+        let expected_key = project_dir_key(&std::env::current_dir().unwrap());
         assert!(
-            path_str.contains("-data-projects-golden-test"),
+            path_str.contains(&expected_key),
             "CC path should contain project dir key, got: {path_str}"
         );
     }
