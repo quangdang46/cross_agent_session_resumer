@@ -465,7 +465,7 @@ reset_env() {
     rm -rf "$CLAUDE_HOME" "$CODEX_HOME" "$GEMINI_HOME" "$CURSOR_HOME" \
         "$CLINE_HOME" "$AIDER_HOME" "$AMP_HOME" "$OPENCODE_HOME" \
         "$CHATGPT_HOME" "$CLAWDBOT_HOME" "$VIBE_HOME" "$FACTORY_HOME" \
-        "$OPENCLAW_HOME" "$PI_AGENT_HOME"
+        "$OPENCLAW_HOME" "$PI_AGENT_HOME" "$KIRO_HOME" "$JCODE_HOME"
 }
 
 # ---------------------------------------------------------------------------
