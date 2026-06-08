@@ -964,11 +964,9 @@ impl Provider for OpenCode {
         }
 
         // --- Phase 2: Build export JSON ---
-        let default_model = session.model_name.clone();
         let export = build_export_json(
             &target_session_id,
             &title,
-            default_model.as_deref().unwrap_or(""),
             session.workspace.as_deref().unwrap_or(Path::new("")),
             created_at,
             updated_at,
@@ -1038,11 +1036,7 @@ impl Provider for OpenCode {
                         t
                     }
                 };
-                let model = msg
-                    .author
-                    .clone()
-                    .or_else(|| default_model.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
+                let model = "unknown".to_string();
 
                 tx.execute(
                     "INSERT INTO messages (
@@ -1345,22 +1339,76 @@ fn project_id(workspace: &Path) -> String {
     result.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Infer the AI model provider from a model name string.
+///
+/// Many model names encode the provider as a prefix
+/// (e.g., `"claude-sonnet-4-20250514"` → `"anthropic"`).
+/// When no prefix matches, the model name itself is returned as the
+/// provider — this works well for single-name providers such as
+/// `"minimax"`, `"deepseek"`, or `"openai"`.
+#[allow(dead_code)]
+fn infer_provider_id(model_name: &str) -> &str {
+    let lower = model_name.trim().to_lowercase();
+    if lower.starts_with("claude") {
+        return "anthropic";
+    }
+    if lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
+        return "openai";
+    }
+    if lower.starts_with("gemini") {
+        return "google";
+    }
+    if lower.starts_with("deepseek") {
+        return "deepseek";
+    }
+    if lower.starts_with("minimax") {
+        return "minimax";
+    }
+    if lower.starts_with("llama") {
+        return "meta";
+    }
+    if lower.starts_with("mistral")
+        || lower.starts_with("codestral")
+        || lower.starts_with("pixtral")
+    {
+        return "mistral";
+    }
+    if lower.starts_with("command") {
+        return "cohere";
+    }
+    if lower.starts_with("dbrx") {
+        return "databricks";
+    }
+    if lower.starts_with("falcon") {
+        return "tii";
+    }
+    if lower.starts_with("phi") {
+        return "microsoft";
+    }
+    if lower.starts_with("yi") {
+        return "01-ai";
+    }
+    if lower.starts_with("qwen") {
+        return "alibaba";
+    }
+    if lower.starts_with("aya") {
+        return "cohere";
+    }
+    // Fallback: use the model name itself as the provider identifier.
+    model_name
+}
+
 /// Build a native OpenCode export JSON value that can be serialized into the
 /// `opencode import` format (each line: `INFO:<json>`).
 fn build_export_json(
     target_session_id: &str,
     title: &str,
-    model_id: &str,
     workspace: &Path,
     created_at: i64,
     updated_at: i64,
     messages: &[CanonicalMessage],
 ) -> serde_json::Value {
-    let model_info = if model_id.is_empty() {
-        serde_json::json!({"id": "unknown", "providerID": "unknown"})
-    } else {
-        serde_json::json!({"id": model_id, "providerID": "unknown"})
-    };
+    let model_info = serde_json::json!({"id": "unknown", "providerID": "unknown"});
 
     let mut export_messages: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
     let mut prev_msg_id: Option<String> = None;
@@ -1373,13 +1421,7 @@ fn build_export_json(
             "system" | "tool" => "assistant",
             other => other,
         };
-        let model = msg
-            .author
-            .as_deref()
-            .or(Some(model_id))
-            .filter(|m| !m.is_empty())
-            .unwrap_or("unknown")
-            .to_string();
+            let model = "unknown".to_string();
 
         let mut parts: Vec<serde_json::Value> = Vec::new();
 
@@ -2426,6 +2468,54 @@ mod tests {
     }
 
     #[test]
+    fn infer_provider_id_known_models() {
+        // Anthropic / Claude
+        assert_eq!(infer_provider_id("claude-sonnet-4-20250514"), "anthropic");
+        assert_eq!(infer_provider_id("CLAUDE-OPUS"), "anthropic");
+        // OpenAI
+        assert_eq!(infer_provider_id("gpt-4o"), "openai");
+        assert_eq!(infer_provider_id("o3-mini"), "openai");
+        assert_eq!(infer_provider_id("o1"), "openai");
+        // Google
+        assert_eq!(infer_provider_id("gemini-2.5-pro"), "google");
+        // DeepSeek
+        assert_eq!(infer_provider_id("deepseek-chat"), "deepseek");
+        assert_eq!(infer_provider_id("DeepSeek-R1"), "deepseek");
+        // MiniMax
+        assert_eq!(infer_provider_id("minimax"), "minimax");
+        // Meta
+        assert_eq!(infer_provider_id("llama-3.1-405b"), "meta");
+        // Mistral
+        assert_eq!(infer_provider_id("mistral-large"), "mistral");
+        assert_eq!(infer_provider_id("codestral-latest"), "mistral");
+        assert_eq!(infer_provider_id("pixtral-12b"), "mistral");
+        // Cohere
+        assert_eq!(infer_provider_id("command-r-plus"), "cohere");
+        assert_eq!(infer_provider_id("aya-23"), "cohere");
+        // Databricks
+        assert_eq!(infer_provider_id("dbrx-instruct"), "databricks");
+        // TII
+        assert_eq!(infer_provider_id("falcon-180b"), "tii");
+        // Microsoft
+        assert_eq!(infer_provider_id("phi-4"), "microsoft");
+        // 01-ai
+        assert_eq!(infer_provider_id("yi-34b"), "01-ai");
+        // Alibaba
+        assert_eq!(infer_provider_id("qwen-2.5-72b"), "alibaba");
+    }
+
+    #[test]
+    fn infer_provider_id_fallback_to_model_name() {
+        // Unknown model names fall back to the input itself.
+        assert_eq!(infer_provider_id("my-custom-model"), "my-custom-model");
+        assert_eq!(infer_provider_id(""), "");
+    }
+
+    #[test]
+    fn infer_provider_id_trims_whitespace() {
+        assert_eq!(infer_provider_id("  claude-opus  "), "anthropic");
+    }
+    #[test]
     fn build_export_json_sets_parentid_on_first_assistant_message() {
         // System role gets mapped to "assistant" during export. The opencode
         // Assistant schema requires parentID, so it must be set even on the
@@ -2445,7 +2535,6 @@ mod tests {
         let export = build_export_json(
             "ses_test-123",
             "Test",
-            "gpt-4",
             workspace,
             1_700_000_000_000,
             1_700_000_010_000,
