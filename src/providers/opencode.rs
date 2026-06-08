@@ -1421,7 +1421,7 @@ fn build_export_json(
             "system" | "tool" => "assistant",
             other => other,
         };
-            let model = "unknown".to_string();
+        let model = "unknown".to_string();
 
         let mut parts: Vec<serde_json::Value> = Vec::new();
 
