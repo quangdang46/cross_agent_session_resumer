@@ -1192,6 +1192,49 @@ fn session_meta_id(path: &Path) -> Option<String> {
 /// Codex v0.137+ uses `~/.codex/state_5.sqlite` as its session registry.
 /// The `threads` table maps session IDs to rollout file paths. Without
 /// this row, `codex resume` returns "No saved session found".
+const THREADS_TABLE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT,
+    cli_version TEXT NOT NULL DEFAULT '',
+    first_user_message TEXT NOT NULL DEFAULT '',
+    agent_nickname TEXT,
+    agent_role TEXT,
+    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+    model TEXT,
+    reasoning_effort TEXT,
+    agent_path TEXT,
+    created_at_ms INTEGER,
+    updated_at_ms INTEGER,
+    thread_source TEXT,
+    preview TEXT NOT NULL DEFAULT ''
+)
+"#;
+
+/// Register a session in Codex's SQLite `threads` table so that
+/// `codex resume <id>` can discover it.
+///
+/// Codex v0.137+ uses `~/.codex/state_5.sqlite` as its session registry.
+/// The `threads` table maps session IDs to rollout file paths. Without
+/// this row, `codex resume` returns "No saved session found".
+///
+/// If the DB or table doesn't exist yet (e.g. Codex hasn't been run yet),
+/// we create them with the schema Codex expects so registration succeeds.
 fn register_in_threads_db(
     session_id: &str,
     rollout_path: &Path,
@@ -1203,11 +1246,20 @@ fn register_in_threads_db(
         .ok_or_else(|| anyhow::anyhow!("cannot determine Codex home directory"))?
         .join("state_5.sqlite");
 
-    debug!(path = %db_path.display(), exists = db_path.exists(), "checking threads DB for registration");
+    let db_exists = db_path.exists();
 
-    if !db_path.exists() {
-        debug!(path = %db_path.display(), "threads DB not found; skipping registration");
-        return Ok(());
+    // Create the DB and threads table if they don't exist, so registration
+    // works even if Codex hasn't been run yet.
+    if !db_exists {
+        debug!(path = %db_path.display(), "creating threads DB and table");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("failed to create {}", db_path.display()))?;
+        conn.execute_batch(THREADS_TABLE_SCHEMA)
+            .with_context(|| format!("failed to create threads table in {}", db_path.display()))?;
     }
 
     let conn = Connection::open(&db_path)
