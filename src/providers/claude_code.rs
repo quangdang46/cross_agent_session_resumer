@@ -600,6 +600,9 @@ fn build_message_content(msg: &CanonicalMessage) -> serde_json::Value {
         _ => {
             if !msg.tool_results.is_empty() {
                 let mut blocks: Vec<serde_json::Value> = Vec::new();
+                if !msg.content.is_empty() {
+                    blocks.push(serde_json::json!({ "type": "text", "text": msg.content }));
+                }
                 for tr in &msg.tool_results {
                     blocks.push(serde_json::json!({
                         "type": "tool_result",
