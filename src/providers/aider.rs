@@ -259,9 +259,12 @@ impl Aider {
                 flush_assistant(&mut assistant_lines, &mut messages);
                 flush_user(&mut user_lines, &mut messages);
 
-                let stripped = rest.trim_end().trim_end_matches("  ");
-                let parsed_model = extract_model_from_tool_line(stripped);
-                let parsed_workspace = extract_workspace_from_tool_line(stripped);
+                let stripped_raw = rest.trim_end().trim_end_matches("  ");
+                // Detect metadata lines BEFORE un-escaping so a literal
+                // `Model: foo` inside tool content (post-escape) is treated
+                // as tool content, not as the session model marker.
+                let parsed_model = extract_model_from_tool_line(stripped_raw);
+                let parsed_workspace = extract_workspace_from_tool_line(stripped_raw);
                 let is_metadata_only_line = parsed_model.is_some() || parsed_workspace.is_some();
 
                 // Extract metadata from tool output lines.
@@ -276,7 +279,7 @@ impl Aider {
                     workspace = Some(ws);
                 }
                 if !is_metadata_only_line {
-                    tool_lines.push(stripped.to_string());
+                    tool_lines.push(unescape_aider_line(stripped_raw));
                 }
 
                 continue;
@@ -288,7 +291,7 @@ impl Aider {
                 flush_tool(&mut tool_lines, &mut messages);
 
                 let stripped = rest.trim_end().trim_end_matches("  ");
-                user_lines.push(stripped.to_string());
+                user_lines.push(unescape_aider_line(stripped));
                 continue;
             }
 
@@ -296,7 +299,7 @@ impl Aider {
             flush_user(&mut user_lines, &mut messages);
             flush_tool(&mut tool_lines, &mut messages);
 
-            assistant_lines.push(line.to_string());
+            assistant_lines.push(unescape_aider_line(line));
         }
 
         // Flush remaining lines.
@@ -483,8 +486,12 @@ impl Provider for Aider {
         session: &CanonicalSession,
         _opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S").to_string();
+        // Use a single Utc::now() sample so the virtual path's session id and
+        // the file's parsed session id cannot drift across a second boundary
+        // (which would cause the read-back to silently match the wrong
+        // existing session in a multi-session history file).
         let now = chrono::Utc::now();
+        let target_session_id = now.format("%Y-%m-%dT%H-%M-%S").to_string();
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
         // Determine target path.
@@ -524,24 +531,33 @@ impl Provider for Aider {
             output.push_str(&format!("> Model: {model}  \n"));
         }
 
-        // Write messages.
+        // Write messages. Each line of content is run through
+        // `escape_aider_line` so that a literal `#### ` or `> ` at the start
+        // of a content line (e.g. an assistant's Markdown sub-header or
+        // blockquote) is not misinterpreted as a new user/tool message block
+        // on read-back.
         for msg in &session.messages {
             match msg.role {
                 MessageRole::User => {
                     // Multi-line user messages: each line gets #### prefix.
                     for line in msg.content.lines() {
-                        output.push_str(&format!("\n#### {line}  \n"));
+                        let escaped = escape_aider_line(line);
+                        output.push_str(&format!("\n#### {escaped}  \n"));
                     }
                 }
                 MessageRole::Assistant => {
                     output.push('\n');
-                    output.push_str(msg.content.trim());
-                    output.push_str("\n\n");
+                    for line in msg.content.trim().lines() {
+                        output.push_str(&escape_aider_line(line));
+                        output.push('\n');
+                    }
+                    output.push('\n');
                 }
                 MessageRole::Tool | MessageRole::System | MessageRole::Other(_) => {
                     // Tool/system output as blockquotes.
                     for line in msg.content.lines() {
-                        output.push_str(&format!("> {line}  \n"));
+                        let escaped = escape_aider_line(line);
+                        output.push_str(&format!("> {escaped}  \n"));
                     }
                 }
             }
@@ -675,6 +691,44 @@ fn extract_workspace_from_tool_line(line: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Escape Aider structural prefixes that appear inside message content.
+///
+/// The reader treats any line starting with `#### ` (user) or `> ` (tool) as
+/// the start of a new structural block. To preserve a literal `#### ` or
+/// `> ` that appears at the start of a line of message content (e.g. an
+/// assistant's Markdown sub-header or blockquote), the writer prefixes the
+/// line with a backslash, and the reader strips it back off on the way in.
+fn escape_aider_line(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("#### ") {
+        format!("\\#### {rest}")
+    } else if line == "####" {
+        "\\####".to_string()
+    } else if let Some(rest) = line.strip_prefix("> ") {
+        format!("\\> {rest}")
+    } else if line == ">" {
+        "\\>".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+/// Reverse of [`escape_aider_line`]. The reader applies this to every
+/// recovered line so the user-visible content is identical to what the
+/// caller wrote.
+fn unescape_aider_line(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("\\#### ") {
+        format!("#### {rest}")
+    } else if line == "\\####" {
+        "####".to_string()
+    } else if let Some(rest) = line.strip_prefix("\\> ") {
+        format!("> {rest}")
+    } else if line == "\\>" {
+        ">".to_string()
+    } else {
+        line.to_string()
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1215,5 +1269,145 @@ Response three
         assert!(content.contains("#### Fix the bug"));
         assert!(content.contains("I'll fix it now."));
         assert!(content.contains("> Model: claude-3"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Structural-prefix escape/unescape
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn escape_unescape_round_trip() {
+        // The escape function must protect the structural prefixes the
+        // reader treats as user/tool boundaries, and the un-escape function
+        // must restore the original content exactly.
+        let cases = vec![
+            "ordinary line",
+            "#### sub-header",
+            "> blockquote",
+            "#### ",
+            "> ",
+            "####",
+            ">",
+        ];
+        for original in cases {
+            let escaped = escape_aider_line(original);
+            let recovered = unescape_aider_line(&escaped);
+            assert_eq!(
+                recovered, original,
+                "escape/unescape round-trip failed for {original:?}"
+            );
+        }
+        // The escape must be visible (otherwise it would not protect).
+        assert!(escape_aider_line("#### sub").starts_with("\\#### "));
+        assert!(escape_aider_line("> quote").starts_with("\\> "));
+    }
+
+    #[test]
+    fn reader_does_not_unescape_raw_aider_markdown() {
+        // The reader's un-escape is the *reverse* of the writer's escape. It
+        // does NOT mutate raw Aider Markdown (which never contains
+        // backslash-escaped `#### ` / `> `). This test documents the
+        // boundary: pre-existing sessions written by real `aider` (with
+        // literal `> some output` tool lines) MUST still parse correctly.
+        let session = read_aider_session(
+            "\
+# aider chat started at 2024-08-05 19:33:02
+
+#### A user question
+
+> some real tool output
+
+#### Sub-question
+
+More text
+
+",
+        );
+        assert_eq!(session.messages.len(), 4, "got {:#?}", session.messages);
+        let roles: Vec<_> = session.messages.iter().map(|m| m.role.clone()).collect();
+        assert_eq!(
+            roles,
+            vec![
+                MessageRole::User,
+                MessageRole::Tool,
+                MessageRole::User,
+                MessageRole::Assistant,
+            ]
+        );
+        assert_eq!(session.messages[1].content, "some real tool output");
+    }
+
+    #[test]
+    fn writer_escapes_structural_prefixes_in_assistant_content() {
+        // End-to-end: write a session whose assistant content has `#### `
+        // and `> ` lines, then read it back and confirm we recover exactly
+        // the same message count and content.
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let session = CanonicalSession {
+            session_id: "escape-test".to_string(),
+            provider_slug: "claude-code".to_string(),
+            workspace: Some(tmp_dir.path().to_path_buf()),
+            title: Some("Escape test".to_string()),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_001_000_000),
+            messages: vec![
+                CanonicalMessage {
+                    idx: 0,
+                    role: MessageRole::User,
+                    content: "How should I structure the docs?".to_string(),
+                    timestamp: None,
+                    author: None,
+                    tool_calls: vec![],
+                    tool_results: vec![],
+                    extra: json!({}),
+                },
+                CanonicalMessage {
+                    idx: 1,
+                    role: MessageRole::Assistant,
+                    content: "Intro\n> Use bullet lists\n#### A sub-header\nMore".to_string(),
+                    timestamp: None,
+                    author: None,
+                    tool_calls: vec![],
+                    tool_results: vec![],
+                    extra: json!({}),
+                },
+            ],
+            metadata: json!({}),
+            source_path: PathBuf::from("/tmp/test.jsonl"),
+            model_name: Some("claude-3".to_string()),
+        };
+
+        let provider = Aider;
+        let opts = WriteOptions {
+            force: false,
+            target_session_id: None,
+        };
+        let written = provider
+            .write_session(&session, &opts)
+            .expect("write should succeed");
+
+        // Read back via the virtual path the writer returned.
+        let readback = provider
+            .read_session(&written.paths[0])
+            .expect("read should succeed");
+        assert_eq!(
+            readback.messages.len(),
+            session.messages.len(),
+            "message count should round-trip; got {:#?}",
+            readback
+                .messages
+                .iter()
+                .map(|m| (&m.role, m.content.as_str()))
+                .collect::<Vec<_>>()
+        );
+        let asst = readback
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("expected assistant");
+        assert_eq!(
+            asst.content,
+            "Intro\n> Use bullet lists\n#### A sub-header\nMore"
+        );
     }
 }

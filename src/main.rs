@@ -54,7 +54,7 @@ struct Cli {
 enum Command {
     /// Convert and resume a session from another provider.
     Resume {
-        /// Target provider alias (cc, cod, gmi, cur, cln, aid, amp, opc, gpt).
+        /// Target provider alias (cc, cod, gmi, cur, cln, aid, amp, opc, gpt, cwb, vib, fac, ocl, kr, jc, pi, omp).
         target: String,
         /// Session ID to convert.
         session_id: String,

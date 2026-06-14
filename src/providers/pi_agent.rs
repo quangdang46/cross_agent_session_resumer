@@ -38,8 +38,8 @@ use tracing::{debug, info, trace};
 
 use crate::discovery::DetectionResult;
 use crate::model::{
-    CanonicalMessage, CanonicalSession, MessageRole, ToolCall, normalize_role, parse_timestamp,
-    reindex_messages, truncate_title,
+    CanonicalMessage, CanonicalSession, MessageRole, ToolCall, ToolResult, normalize_role,
+    parse_timestamp, reindex_messages, truncate_title,
 };
 use crate::providers::{Provider, WriteOptions, WrittenSession};
 
@@ -311,13 +311,47 @@ impl Provider for PiAgent {
                     let content_val = msg.get("content");
                     let content = content_val.map(Self::flatten_content).unwrap_or_default();
 
-                    if content.trim().is_empty() {
-                        continue;
-                    }
-
                     let tool_calls = content_val
                         .map(Self::extract_tool_calls)
                         .unwrap_or_default();
+
+                    // For toolResult messages, the related tool call id lives on
+                    // `message.toolCallId` and the error flag on `message.isError`.
+                    // Build a proper `ToolResult` so downstream writers (codex,
+                    // opencode, claude_code, ...) can serialize it back to a
+                    // structured tool_result block linked to its originating
+                    // tool call.
+                    let tool_results: Vec<ToolResult> = if role == MessageRole::Tool {
+                        let call_id = msg
+                            .get("toolCallId")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let is_error = msg
+                            .get("isError")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        // For tool messages, skip ones with empty content unless
+                        // they at least carry a call_id (so we still preserve the
+                        // call linkage even when output is empty).
+                        if content.trim().is_empty() && call_id.is_none() {
+                            Vec::new()
+                        } else {
+                            vec![ToolResult {
+                                call_id,
+                                content: content.clone(),
+                                is_error,
+                            }]
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    // For non-tool messages, drop entries with empty content to
+                    // mirror the original behaviour. Tool messages are handled
+                    // by the branch above.
+                    if role != MessageRole::Tool && content.trim().is_empty() {
+                        continue;
+                    }
 
                     let ts = val.get("timestamp").and_then(parse_timestamp);
 
@@ -345,7 +379,7 @@ impl Provider for PiAgent {
                         timestamp: ts,
                         author,
                         tool_calls,
-                        tool_results: vec![],
+                        tool_results,
                         extra: val,
                     });
                 }
@@ -677,6 +711,59 @@ mod tests {
             r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"toolResult","content":"Tool output here"}}"#,
         ]);
         assert_eq!(session.messages[0].role, MessageRole::Tool);
+        // Plain toolResult with no toolCallId should still produce a
+        // tool_results entry so downstream writers see the message.
+        assert_eq!(session.messages[0].tool_results.len(), 1);
+        assert_eq!(
+            session.messages[0].tool_results[0].content,
+            "Tool output here"
+        );
+        assert!(!session.messages[0].tool_results[0].is_error);
+        assert!(session.messages[0].tool_results[0].call_id.is_none());
+    }
+
+    #[test]
+    fn reader_tool_result_extracts_tool_call_id_and_error() {
+        // Pi-Agent toolResult messages carry the originating tool call id on
+        // `message.toolCallId` and the error flag on `message.isError`. The
+        // reader must thread both into the canonical `ToolResult` so codex,
+        // opencode, claude_code, ... writers can serialise the linkage.
+        let session = read_piagent(&[
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"toolResult","toolCallId":"call_00_abc","toolName":"shell","isError":false,"content":[{"type":"text","text":"ok"}]}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"toolResult","toolCallId":"call_01_def","toolName":"read","isError":true,"content":[{"type":"text","text":"ENOENT"}]}}"#,
+        ]);
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, MessageRole::Tool);
+        assert_eq!(session.messages[0].tool_results.len(), 1);
+        assert_eq!(
+            session.messages[0].tool_results[0].call_id.as_deref(),
+            Some("call_00_abc"),
+        );
+        assert!(!session.messages[0].tool_results[0].is_error);
+
+        assert_eq!(session.messages[1].tool_results.len(), 1);
+        assert_eq!(
+            session.messages[1].tool_results[0].call_id.as_deref(),
+            Some("call_01_def"),
+        );
+        assert!(session.messages[1].tool_results[0].is_error);
+        assert_eq!(session.messages[1].tool_results[0].content, "ENOENT");
+    }
+
+    #[test]
+    fn reader_tool_result_empty_content_with_call_id_kept() {
+        // A toolResult with an empty content array but a valid call_id is
+        // still useful (preserves the tool-call linkage for downstream
+        // writers). The reader must not drop it.
+        let session = read_piagent(&[
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"toolResult","toolCallId":"call_x","isError":false,"content":[{"type":"text","text":""}]}}"#,
+        ]);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].tool_results.len(), 1);
+        assert_eq!(
+            session.messages[0].tool_results[0].call_id.as_deref(),
+            Some("call_x"),
+        );
     }
 
     #[test]

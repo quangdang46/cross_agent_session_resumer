@@ -1051,4 +1051,52 @@ mod tests {
         let name = repo_name_from_path(&PathBuf::from("/data/projects/some_tool"));
         assert_eq!(name.as_deref(), Some("some_tool"));
     }
+
+    /// Regression: every `Provider::cli_alias()` returned by the default
+    /// registry must be in the documented alias set, and that set must match
+    /// the help text in `casr resume --help`. Adding a new provider without
+    /// updating either the help text or the registry (or vice versa) will
+    /// fail this test, preventing the bug class reported for `kr` (kiro)
+    /// from recurring.
+    #[test]
+    fn default_registry_cli_aliases_match_documented_set() {
+        let registry = ProviderRegistry::default_registry();
+        let mut found: Vec<String> = registry
+            .all_providers()
+            .iter()
+            .map(|p| p.cli_alias().to_string())
+            .collect();
+        found.sort();
+        found.dedup();
+
+        let mut expected: Vec<String> = vec![
+            "cc", "cod", "gmi", "cur", "cln", "aid", "amp", "opc", "gpt", "cwb", "vib", "fac",
+            "ocl", "kr", "jc", "pi",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        expected.sort();
+
+        assert_eq!(
+            found, expected,
+            "default registry cli_alias() set does not match the documented alias set; \
+             update either the registry, the help text in main.rs::Command::Resume::target, \
+             or both. found={found:?} expected={expected:?}"
+        );
+
+        // `omp` is a secondary alias for pi-agent. Verify the registry can
+        // resolve it (it's wired in `find_by_alias`).
+        assert!(
+            registry.find_by_alias("omp").is_some(),
+            "omp must resolve to a provider (secondary alias for pi-agent)"
+        );
+        // All aliases must be unique.
+        let mut all_aliases = found.clone();
+        all_aliases.push("omp".to_string());
+        let mut deduped = all_aliases.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(all_aliases.len(), deduped.len(), "duplicate alias detected");
+    }
 }

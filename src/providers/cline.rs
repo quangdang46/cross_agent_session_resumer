@@ -9,6 +9,30 @@
 //!
 //! Where `<HOST_CONFIG>` can be VS Code (`Code`, `Code - Insiders`, `VSCodium`) or Cursor.
 //!
+//! ## Locations searched
+//!
+//! - **macOS**:
+//!   `~/Library/Application Support/{Code,Code - Insiders,VSCodium,Cursor}/User/globalStorage/<id>`
+//! - **Linux**:
+//!   - `~/.config/{Code,Code - Insiders,VSCodium,Cursor}/User/globalStorage/<id>`
+//!   - `~/.local/share/{Code,Code - Insiders,VSCodium,Cursor}/User/globalStorage/<id>`
+//! - **Windows**:
+//!   - `%APPDATA%\{Code,Code - Insiders,VSCodium,Cursor}\User\globalStorage\<id>`
+//!   - `%LOCALAPPDATA%\Cursor\User\globalStorage\<id>` (Cursor's per-platform default)
+//!
+//! Where `<id>` is one of the known extension identifiers in
+//! [`CLINE_EXTENSION_IDS`] (probed in order).
+//!
+//! ## Environment overrides
+//!
+//! In increasing precedence:
+//! 1. Canonical macOS / Linux / Windows locations (probed automatically).
+//! 2. `VSCODE_USER_DATA_DIR` — when set, points at a user-data dir
+//!    (we append `/User/globalStorage/<id>`).
+//! 3. `VSCODE_PORTABLE` — when set, points at a portable install root
+//!    (we append `/user-data/User/globalStorage/<id>`).
+//! 4. `CLINE_HOME` — explicit override for the globalStorage directory.
+//!
 //! ## Session IDs
 //!
 //! Task IDs are numeric strings (typically `Date.now()` / epoch millis).
@@ -26,8 +50,16 @@ use crate::model::{
 };
 use crate::providers::{Provider, WriteOptions, WrittenSession};
 
-/// VS Code Marketplace extension identifier.
-const CLINE_EXTENSION_ID: &str = "saoudrizwan.claude-dev";
+/// VS Code Marketplace extension identifier (primary / historical).
+const CLINE_EXTENSION_ID_PRIMARY: &str = "saoudrizwan.claude-dev";
+/// Newer Cline releases have been published under additional ids; probe them
+/// all so a future marketplace rename doesn't silently break detection.
+const CLINE_EXTENSION_ID_FORK: &str = "claude-dev.claude-dev";
+/// Ordered list of extension ids to probe under each host root.
+const CLINE_EXTENSION_IDS: &[&str] = &[CLINE_EXTENSION_ID_PRIMARY, CLINE_EXTENSION_ID_FORK];
+
+/// Editor host names whose `<host>/User/globalStorage/<id>` may host Cline.
+const EDITOR_HOSTS: &[&str] = &["Code", "Code - Insiders", "VSCodium", "Cursor"];
 
 const FILE_API_HISTORY: &str = "api_conversation_history.json";
 const FILE_UI_MESSAGES: &str = "ui_messages.json";
@@ -39,44 +71,82 @@ const FILE_TASK_HISTORY: &str = "taskHistory.json";
 pub struct Cline;
 
 impl Cline {
+    /// Build the list of *candidate* storage roots (one per (host, extension
+    /// id) combination, plus env-var overrides). The result is NOT filtered
+    /// for existence — callers that need to write should call
+    /// [`Self::pick_storage_root_for_write`] (which filters + returns the
+    /// first hit) or [`Self::existing_storage_roots`] (for diagnostics /
+    /// session discovery).
+    fn candidate_storage_roots() -> Vec<PathBuf> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        // 1. CLINE_HOME — explicit override wins, no further probing.
+        if let Ok(home) = std::env::var("CLINE_HOME") {
+            return vec![PathBuf::from(home)];
+        }
+
+        // 2. VSCODE_PORTABLE — when set, points at a portable install root.
+        if let Ok(portable) = std::env::var("VSCODE_PORTABLE") {
+            let p = PathBuf::from(&portable);
+            for id in CLINE_EXTENSION_IDS {
+                candidates.push(
+                    p.join("user-data")
+                        .join("User")
+                        .join("globalStorage")
+                        .join(id),
+                );
+            }
+        }
+
+        // 3. VSCODE_USER_DATA_DIR — points at a user-data dir.
+        if let Ok(user_data) = std::env::var("VSCODE_USER_DATA_DIR") {
+            let p = PathBuf::from(&user_data);
+            for id in CLINE_EXTENSION_IDS {
+                candidates.push(p.join("User").join("globalStorage").join(id));
+            }
+        }
+
+        // 4. Canonical per-platform locations, probing both the config_dir
+        //    and the data_dir base (which differ on Linux / Windows).
+        let mut bases: Vec<PathBuf> = Vec::new();
+        for dir_fn in [dirs::config_dir, dirs::data_dir] {
+            if let Some(b) = dir_fn() {
+                bases.push(b);
+            }
+        }
+        // Windows additionally uses %LOCALAPPDATA% for some Cursor installs.
+        #[cfg(target_os = "windows")]
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            bases.push(PathBuf::from(local));
+        }
+        for base in &bases {
+            for host in EDITOR_HOSTS {
+                for id in CLINE_EXTENSION_IDS {
+                    candidates.push(base.join(host).join("User").join("globalStorage").join(id));
+                }
+            }
+        }
+
+        // Deduplicate while preserving order.
+        candidates.sort();
+        candidates.dedup();
+        candidates
+    }
+
+    /// Filter the candidate list to the subset that actually exists on disk.
+    fn existing_storage_roots() -> Vec<PathBuf> {
+        Self::candidate_storage_roots()
+            .into_iter()
+            .filter(|p| p.is_dir())
+            .collect()
+    }
+
     /// Cline globalStorage root. Respects `CLINE_HOME` env var override.
     ///
     /// The value is expected to be the extension's globalStorage directory, i.e.
     /// the directory that contains `tasks/` and `state/`.
     fn storage_roots() -> Vec<PathBuf> {
-        if let Ok(home) = std::env::var("CLINE_HOME") {
-            return vec![PathBuf::from(home)];
-        }
-
-        // Editor config roots that can host VS Code-style `User/globalStorage`.
-        // We probe both config_dir and data_dir to cover Linux/Windows vs macOS.
-        let mut host_roots: Vec<PathBuf> = Vec::new();
-        if let Some(cfg) = dirs::config_dir() {
-            host_roots.push(cfg.join("Code"));
-            host_roots.push(cfg.join("Code - Insiders"));
-            host_roots.push(cfg.join("VSCodium"));
-            host_roots.push(cfg.join("Cursor"));
-        }
-        if let Some(data) = dirs::data_dir() {
-            host_roots.push(data.join("Code"));
-            host_roots.push(data.join("Code - Insiders"));
-            host_roots.push(data.join("VSCodium"));
-            host_roots.push(data.join("Cursor"));
-        }
-
-        // Deduplicate while preserving order.
-        host_roots.sort();
-        host_roots.dedup();
-
-        host_roots
-            .into_iter()
-            .map(|host| {
-                host.join("User")
-                    .join("globalStorage")
-                    .join(CLINE_EXTENSION_ID)
-            })
-            .filter(|p| p.is_dir())
-            .collect()
+        Self::existing_storage_roots()
     }
 
     fn tasks_root(storage_root: &Path) -> PathBuf {
@@ -198,12 +268,35 @@ impl Cline {
     }
 
     fn pick_storage_root_for_write() -> anyhow::Result<PathBuf> {
-        let roots = Self::storage_roots();
-        roots.into_iter().next().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Cline storage not found. Set CLINE_HOME to the extension globalStorage directory."
-            )
-        })
+        // Re-evaluate candidates so we can list the ones we tried (the
+        // `existing_storage_roots` helper would silently drop them).
+        let candidates = Self::candidate_storage_roots();
+        let existing: Vec<PathBuf> = candidates.iter().filter(|p| p.is_dir()).cloned().collect();
+        if let Some(root) = existing.into_iter().next() {
+            return Ok(root);
+        }
+
+        // Build an actionable error that lists every path we tried and the
+        // env-var overrides the user can set. Users with non-default VS Code
+        // installs (portable mode, --user-data-dir) routinely hit the bare
+        // "not found" message and have no way to recover without reading the
+        // source — surface the candidates directly.
+        let mut msg = String::from(
+            "Cline storage not found. Set CLINE_HOME to the extension globalStorage directory \
+             (the directory that contains `tasks/` and `state/`).",
+        );
+        msg.push_str(&format!(
+            "\n  Checked {} candidate path(s):",
+            candidates.len()
+        ));
+        for c in &candidates {
+            msg.push_str(&format!("\n    - {}", c.display()));
+        }
+        msg.push_str(
+            "\n  Also honored: VSCODE_USER_DATA_DIR, VSCODE_PORTABLE (set one of these \
+             to point at a non-default VS Code install).",
+        );
+        Err(anyhow::anyhow!(msg))
     }
 
     fn generate_task_id(storage_root: &Path) -> String {
@@ -1927,5 +2020,71 @@ mod tests {
     #[test]
     fn extract_tool_results_none_input() {
         assert!(Cline::extract_tool_results(None).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage-root detection
+    //
+    // The env-var-driven tests live in `tests/cline_storage_roots_test.rs`
+    // because the lib crate has `#![forbid(unsafe_code)]` and env mutation
+    // requires an unsafe block. The unit tests below exercise the same
+    // invariants that don't require env mutation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pick_storage_root_error_lists_checked_paths() {
+        // With no env override and (almost certainly) no real install, the
+        // error must list the candidate paths and the env-var overrides so
+        // the user has something actionable. This test only runs when the
+        // process has no CLINE_HOME set; otherwise it's a no-op.
+        if std::env::var_os("CLINE_HOME").is_some() {
+            eprintln!("skipping: CLINE_HOME is set in the test environment");
+            return;
+        }
+        let err =
+            Cline::pick_storage_root_for_write().expect_err("should fail when no installable root");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CLINE_HOME"),
+            "error must mention CLINE_HOME: {msg}"
+        );
+        assert!(
+            msg.contains("VSCODE_USER_DATA_DIR"),
+            "error must mention VSCODE_USER_DATA_DIR: {msg}"
+        );
+        assert!(
+            msg.contains("VSCODE_PORTABLE"),
+            "error must mention VSCODE_PORTABLE: {msg}"
+        );
+        assert!(
+            msg.contains("Checked"),
+            "error must include checked count: {msg}"
+        );
+    }
+
+    #[test]
+    fn candidate_list_includes_both_extension_ids() {
+        // Without any env override, the candidate list must include both the
+        // primary and the fork extension id under each host so a future
+        // marketplace rename doesn't silently break detection. Skip if
+        // CLINE_HOME is set (it short-circuits the candidate builder).
+        if std::env::var_os("CLINE_HOME").is_some() {
+            eprintln!("skipping: CLINE_HOME is set in the test environment");
+            return;
+        }
+        let candidates = Cline::candidate_storage_roots();
+        let primary_count = candidates
+            .iter()
+            .filter(|p| p.ends_with(CLINE_EXTENSION_ID_PRIMARY))
+            .count();
+        let fork_count = candidates
+            .iter()
+            .filter(|p| p.ends_with(CLINE_EXTENSION_ID_FORK))
+            .count();
+        assert_eq!(
+            primary_count, fork_count,
+            "primary and fork ids must be probed equally"
+        );
+        assert!(primary_count > 0);
     }
 }

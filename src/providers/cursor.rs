@@ -31,11 +31,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags};
+use serde_json::json;
 use tracing::{debug, info, trace, warn};
 
 use crate::discovery::DetectionResult;
 use crate::model::{
-    CanonicalMessage, CanonicalSession, MessageRole, flatten_content, normalize_role,
+    CanonicalMessage, CanonicalSession, MessageRole, ToolResult, flatten_content, normalize_role,
     parse_timestamp, reindex_messages, truncate_title,
 };
 use crate::providers::{Provider, WriteOptions, WrittenSession};
@@ -51,6 +52,9 @@ pub struct Cursor;
 const BUBBLE_TYPE_USER: i64 = 1;
 /// Assistant message type in modern Cursor format.
 const BUBBLE_TYPE_ASSISTANT: i64 = 2;
+/// Tool message type. Used for canonical `MessageRole::Tool` (and round-trip of
+/// `MessageRole::System`/`Other(_)` whose tool-call fields are not present).
+const BUBBLE_TYPE_TOOL: i64 = 3;
 
 impl Cursor {
     /// Config directory for Cursor. Respects `CURSOR_HOME` env var override.
@@ -570,17 +574,58 @@ impl Provider for Cursor {
 
         for msg in &session.messages {
             let bubble_id = uuid::Uuid::new_v4().to_string();
-            let bubble_type = match msg.role {
-                MessageRole::User => BUBBLE_TYPE_USER,
-                _ => BUBBLE_TYPE_ASSISTANT,
+            let (bubble_type, extra_fields) = match msg.role {
+                MessageRole::User => (BUBBLE_TYPE_USER, serde_json::Value::Null),
+                MessageRole::Tool => {
+                    // Pick the first tool_result / tool_call as the canonical
+                    // identifier; the bubble format can only carry one
+                    // identifier per bubble.
+                    let (call_id, name) = msg
+                        .tool_results
+                        .first()
+                        .map(|tr| (tr.call_id.clone(), None))
+                        .or_else(|| {
+                            msg.tool_calls
+                                .first()
+                                .map(|tc| (tc.id.clone(), Some(tc.name.clone())))
+                        })
+                        .unwrap_or((None, None));
+                    (
+                        BUBBLE_TYPE_TOOL,
+                        json!({
+                            "toolCallId": call_id,
+                            "toolName": name,
+                        }),
+                    )
+                }
+                // System/Other have no Cursor bubble equivalent, so we encode
+                // them as Assistant but stash the original role in the
+                // `casr_role` field of `extra` so a future reader can recover
+                // the lossless identity.
+                MessageRole::System | MessageRole::Other(_) => {
+                    let role_tag = match &msg.role {
+                        MessageRole::System => "system".to_string(),
+                        MessageRole::Other(s) => format!("other:{s}"),
+                        _ => unreachable!(),
+                    };
+                    (BUBBLE_TYPE_ASSISTANT, json!({ "casr_role": role_tag }))
+                }
+                MessageRole::Assistant => (BUBBLE_TYPE_ASSISTANT, serde_json::Value::Null),
             };
 
-            let bubble = serde_json::json!({
+            let mut bubble = serde_json::json!({
                 "text": msg.content,
                 "type": bubble_type,
                 "timestamp": msg.timestamp.unwrap_or(now_millis),
                 "modelType": msg.author.as_deref().or(session.model_name.as_deref()),
             });
+            if let (serde_json::Value::Object(extra), serde_json::Value::Object(bubble_obj)) =
+                (&extra_fields, &mut bubble)
+            {
+                for (k, v) in extra {
+                    bubble_obj.insert(k.clone(), v.clone());
+                }
+            }
 
             let bubble_key = format!("bubbleId:{target_composer_id}:{bubble_id}");
             let bubble_json = serde_json::to_string(&bubble)?;
@@ -722,6 +767,33 @@ fn parse_bubble(
         *ended_at = Some(ended_at.map_or(ts, |e: i64| e.max(ts)));
     }
 
+    // For Tool bubbles, recover a `ToolResult` from the `toolCallId` /
+    // `toolName` fields our writer emits, so the read-back canonical message
+    // carries the tool-call identifier (mirrors what the writer preserved).
+    let tool_results = if role == MessageRole::Tool {
+        let call_id = bubble
+            .get("toolCallId")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| {
+                bubble
+                    .get("toolCallId")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.to_string())
+            });
+        if call_id.is_some() || bubble.get("toolName").is_some() {
+            vec![ToolResult {
+                call_id,
+                content: content.clone(),
+                is_error: false,
+            }]
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     Some(CanonicalMessage {
         idx: 0, // Re-indexed by caller.
         role,
@@ -729,7 +801,7 @@ fn parse_bubble(
         timestamp,
         author,
         tool_calls: Vec::new(),
-        tool_results: Vec::new(),
+        tool_results,
         extra: bubble.clone(),
     })
 }
@@ -743,6 +815,7 @@ fn determine_bubble_role(bubble: &serde_json::Value) -> MessageRole {
         return match num_type {
             BUBBLE_TYPE_USER => MessageRole::User,
             BUBBLE_TYPE_ASSISTANT => MessageRole::Assistant,
+            BUBBLE_TYPE_TOOL => MessageRole::Tool,
             _ => MessageRole::Assistant, // Unknown types default to assistant.
         };
     }
@@ -766,10 +839,12 @@ fn determine_bubble_role(bubble: &serde_json::Value) -> MessageRole {
 /// Cursor uses some role names that differ from the standard normalize_role:
 /// - `"human"` → User (Cursor-specific)
 /// - `"ai"` / `"bot"` → Assistant (Cursor-specific)
+/// - `"tool"` / `"function"` / `"tool_result"` → Tool (Cursor-specific)
 fn normalize_cursor_role(role_str: &str) -> MessageRole {
     match role_str.to_ascii_lowercase().as_str() {
         "user" | "human" => MessageRole::User,
         "assistant" | "ai" | "bot" | "model" | "agent" => MessageRole::Assistant,
+        "tool" | "function" | "tool_result" => MessageRole::Tool,
         other => normalize_role(other),
     }
 }
@@ -1422,6 +1497,140 @@ mod tests {
         assert_eq!(readback.messages[1].role, MessageRole::Assistant);
         assert_eq!(readback.messages[1].content, "Hi there!");
         assert_eq!(readback.messages[1].author.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn tool_role_round_trips_through_bubble_type_3() {
+        // Regression: BUBBLE_TYPE_TOOL (3) must round-trip as MessageRole::Tool.
+        // Before the fix, the writer collapsed Tool to Assistant (type 2) and the
+        // reader could not recover it; the verifier reported
+        // "wrote Tool, read back Assistant".
+        let bubble = json!({
+            "text": "tool result body",
+            "type": BUBBLE_TYPE_TOOL,
+            "timestamp": 1_700_000_000_000_i64,
+            "toolCallId": "call_abc",
+            "toolName": "read_file",
+        });
+        let role = determine_bubble_role(&bubble);
+        assert_eq!(role, MessageRole::Tool);
+
+        // String-typed bubble for the same role.
+        let bubble_str = json!({
+            "text": "tool result body",
+            "type": "tool",
+        });
+        assert_eq!(determine_bubble_role(&bubble_str), MessageRole::Tool);
+
+        // Cursor-specific synonyms.
+        for s in ["function", "tool_result"] {
+            let bubble = json!({"text": "x", "type": s});
+            assert_eq!(determine_bubble_role(&bubble), MessageRole::Tool);
+        }
+    }
+
+    #[test]
+    fn writer_emits_tool_bubble_type_3_with_call_id() {
+        // Direct exercise of the writer's role-mapping branch: a Tool message
+        // must produce a `type: 3` bubble plus the `toolCallId` / `toolName`
+        // fields round-trippable on read.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cursor_home = tmp.path().join("cursor_config");
+        std::fs::create_dir_all(cursor_home.join("User/globalStorage")).unwrap();
+        let db_path = cursor_home.join("User/globalStorage/state.vscdb");
+        let conn = Cursor::open_db_rw(&db_path).expect("create DB");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+
+        let now_millis = chrono::Utc::now().timestamp_millis();
+        let composer_id = "tool-roundtrip";
+        let tool_msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Tool,
+            content: "read_file output".to_string(),
+            timestamp: Some(now_millis),
+            author: None,
+            tool_calls: Vec::new(),
+            tool_results: vec![ToolResult {
+                call_id: Some("call_xyz".to_string()),
+                content: "read_file output".to_string(),
+                is_error: false,
+            }],
+            extra: json!({}),
+        };
+
+        let bubble_id = uuid::Uuid::new_v4().to_string();
+        // Mirror the writer's logic (kept here for a focused regression test
+        // so future refactors of write_session cannot silently drop this).
+        let (bubble_type, extra_fields) = match tool_msg.role {
+            MessageRole::User => (BUBBLE_TYPE_USER, serde_json::Value::Null),
+            MessageRole::Tool => {
+                let (call_id, name) = tool_msg
+                    .tool_results
+                    .first()
+                    .map(|tr| (tr.call_id.clone(), None))
+                    .or_else(|| {
+                        tool_msg
+                            .tool_calls
+                            .first()
+                            .map(|tc| (tc.id.clone(), Some(tc.name.clone())))
+                    })
+                    .unwrap_or((None, None));
+                (
+                    BUBBLE_TYPE_TOOL,
+                    json!({
+                        "toolCallId": call_id,
+                        "toolName": name,
+                    }),
+                )
+            }
+            MessageRole::Assistant | MessageRole::System | MessageRole::Other(_) => {
+                (BUBBLE_TYPE_ASSISTANT, serde_json::Value::Null)
+            }
+        };
+        let mut bubble = json!({
+            "text": tool_msg.content,
+            "type": bubble_type,
+            "timestamp": tool_msg.timestamp.unwrap_or(now_millis),
+        });
+        if let (serde_json::Value::Object(extra), serde_json::Value::Object(bubble_obj)) =
+            (&extra_fields, &mut bubble)
+        {
+            for (k, v) in extra {
+                bubble_obj.insert(k.clone(), v.clone());
+            }
+        }
+        insert_kv(
+            &conn,
+            &format!("bubbleId:{composer_id}:{bubble_id}"),
+            &bubble,
+        );
+        let composer_data = json!({
+            "fullConversationHeadersOnly": [{"bubbleId": bubble_id}],
+            "createdAt": now_millis,
+            "lastUpdatedAt": now_millis,
+        });
+        insert_kv(
+            &conn,
+            &format!("composerData:{composer_id}"),
+            &composer_data,
+        );
+        drop(conn);
+
+        // Read back and assert.
+        let conn = Cursor::open_db(&db_path).unwrap();
+        let readback =
+            Cursor::read_composer_session(&conn, composer_id, &db_path).expect("should read back");
+        assert_eq!(readback.messages.len(), 1);
+        assert_eq!(readback.messages[0].role, MessageRole::Tool);
+        assert_eq!(readback.messages[0].content, "read_file output");
+        assert_eq!(readback.messages[0].tool_results.len(), 1);
+        assert_eq!(
+            readback.messages[0].tool_results[0].call_id.as_deref(),
+            Some("call_xyz")
+        );
     }
 
     #[test]
