@@ -1362,11 +1362,17 @@ fn build_parts(message: &CanonicalMessage) -> serde_json::Value {
     }
 
     for result in &message.tool_results {
+        let tool_name = message
+            .tool_calls
+            .iter()
+            .find(|tc| tc.id == result.call_id)
+            .map(|tc| tc.name.as_str())
+            .unwrap_or("tool");
         parts.push(serde_json::json!({
             "type": "tool_result",
             "data": {
                 "tool_call_id": result.call_id.clone().unwrap_or_default(),
-                "name": "tool",
+                "name": tool_name,
                 "content": result.content,
                 "metadata": "",
                 "is_error": result.is_error
@@ -1537,7 +1543,7 @@ fn build_export_json(
             }));
         }
 
-        // Tool call parts (pending state).
+        // Tool call parts — completed if a matching tool_result exists, otherwise pending.
         for tc in &msg.tool_calls {
             let tc_input: serde_json::Value = tc
                 .arguments
@@ -1551,28 +1557,59 @@ fn build_export_json(
             };
             let raw_str =
                 serde_json::to_string(&tc.arguments).unwrap_or_else(|_| tc.arguments.to_string());
-            parts.push(serde_json::json!({
-                "type": "tool",
-                "tool": tc.name,
-                "callID": tc_id,
-                "state": {
-                    "status": "pending",
-                    "input": tc_input_obj,
-                    "raw": raw_str,
-                },
-                "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                "sessionID": target_session_id,
-                "messageID": msg_id,
-            }));
+
+            let matching_tr = msg.tool_results.iter().find(|tr| tr.call_id == tc.id);
+            if let Some(tr) = matching_tr {
+                parts.push(serde_json::json!({
+                    "type": "tool",
+                    "tool": tc.name,
+                    "callID": tc_id,
+                    "state": {
+                        "status": "completed",
+                        "input": tc_input_obj,
+                        "output": tr.content,
+                        "title": tc.name,
+                        "metadata": "",
+                        "raw": raw_str,
+                        "time": {
+                            "start": ts,
+                            "end": ts,
+                        },
+                    },
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            } else {
+                parts.push(serde_json::json!({
+                    "type": "tool",
+                    "tool": tc.name,
+                    "callID": tc_id,
+                    "state": {
+                        "status": "pending",
+                        "input": tc_input_obj,
+                        "raw": raw_str,
+                    },
+                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
+                    "sessionID": target_session_id,
+                    "messageID": msg_id,
+                }));
+            }
         }
 
         // Tool result parts (completed or error state).
         for tr in &msg.tool_results {
             let call_id = tr.call_id.clone().unwrap_or_default();
+            let tool_name = msg
+                .tool_calls
+                .iter()
+                .find(|tc| tc.id == tr.call_id)
+                .map(|tc| tc.name.as_str())
+                .unwrap_or("tool");
             if tr.is_error {
                 parts.push(serde_json::json!({
                     "type": "tool",
-                    "tool": "tool_result",
+                    "tool": tool_name,
                     "callID": call_id,
                     "state": {
                         "status": "error",
@@ -1591,13 +1628,13 @@ fn build_export_json(
             } else {
                 parts.push(serde_json::json!({
                     "type": "tool",
-                    "tool": "tool_result",
+                    "tool": tool_name,
                     "callID": call_id,
                     "state": {
                         "status": "completed",
                         "input": serde_json::Value::Object(serde_json::Map::new()),
                         "output": tr.content,
-                        "title": "tool_result",
+                        "title": tool_name,
                         "metadata": serde_json::Value::Object(serde_json::Map::new()),
                         "time": {
                             "start": ts,
@@ -1637,7 +1674,7 @@ fn build_export_json(
             // consistent with the format the importer validates.
             serde_json::json!({
                 "role": "assistant",
-                "time": { "created": ts },
+                "time": { "created": ts, "completed": ts.saturating_add(1) },
                 "id": msg_id,
                 "sessionID": target_session_id,
                 "parentID": prev_msg_id.as_ref().unwrap_or(&msg_id),
