@@ -462,10 +462,12 @@ cross_agent_session_resumer/
   - `cc` -> Claude Code
   - `cod` -> Codex
   - `gmi` -> Gemini CLI
+  - `omp` -> Pi Agent (oh-my-pi CLI; sessions under `~/.omp/agent/`, alias of `pi`)
 - Provider home overrides:
   - `CLAUDE_HOME`
   - `CODEX_HOME`
   - `GEMINI_HOME`
+  - `OMP_HOME`, `PI_AGENT_HOME` (oh-my-pi / Pi Agent)
 
 ### CLI Surface
 

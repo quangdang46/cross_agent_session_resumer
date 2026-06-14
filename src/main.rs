@@ -809,6 +809,7 @@ fn cmd_list(
             "vibe" => "Vibe",
             "factory" => "Factory",
             "openclaw" => "OpenClaw",
+            "omp" => "Pi-Agent (omp)",
             "pi-agent" => "Pi-Agent",
             _ => provider,
         }

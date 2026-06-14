@@ -453,6 +453,8 @@ fn canonical_provider_token(token: &str) -> &str {
         "claude" => "claude-code",
         "codex-cli" => "codex",
         "gemini-cli" => "gemini",
+        // omp (oh-my-pi) CLI — same JSONL format as pi-agent.
+        "omp" => "pi-agent",
         _ => token,
     }
 }

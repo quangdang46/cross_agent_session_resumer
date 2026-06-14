@@ -97,7 +97,7 @@ claude --resume <new-session-id>
 | Vibe | `vib` | Yes | Yes | `vibe --resume <session-id>` |
 | Factory | `fac` | Yes | Yes | `factory --resume <session-id>` |
 | OpenClaw | `ocl` | Yes | Yes | `openclaw --resume <session-id>` |
-| Pi-Agent | `pi` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
+| Pi-Agent | `pi`, `omp` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
 
 Notes:
 - Initial core focus is Claude Code, Codex, and Gemini CLI.
@@ -282,6 +282,7 @@ export CLINE_HOME="$HOME/.config/Code/User/globalStorage/saoudrizwan.claude-dev"
 export AIDER_HOME="$HOME/.aider"
 export AMP_HOME="$HOME/.local/share/amp"
 export OPENCODE_HOME="$HOME/.opencode"
+export OMP_HOME="$HOME/.omp/agent"          # Pi-Agent / oh-my-pi
 
 # Logging verbosity (alternative to --verbose / --trace)
 export RUST_LOG="casr=debug"
@@ -396,6 +397,7 @@ Alias normalization also accepts common provider tokens:
 - `claude` maps to `claude-code`
 - `codex-cli` maps to `codex`
 - `gemini-cli` maps to `gemini`
+- `omp` maps to `pi-agent`
 
 ## Deterministic Resolution Algorithm
 
@@ -530,6 +532,11 @@ Recommended test set for new providers:
 - Error-path tests for malformed input and file I/O failures.
 
 ## Provider Format Notes
+
+### Pi-Agent / omp
+- The same provider supports Pi-Agent (`~/.pi/agent/sessions/`) and oh-my-pi / omp (`~/.omp/agent/sessions/`).
+- Alias `omp` is treated as an alias of `pi-agent`. Set `$OMP_HOME` (or `$PI_AGENT_HOME`) to override.
+- JSONL with typed entries: `session`, `message`, `model_change`, `thinking_level_change`.
 
 ### Claude Code
 - Source path pattern: `~/.claude/projects/<project-hash>/<session-id>.jsonl`

@@ -1,7 +1,11 @@
 //! Pi-Agent provider — reads/writes JSONL sessions with typed entries and content blocks.
 //!
 //! Session files: `~/.pi/agent/sessions/<safe-path>/<timestamp>_<uuid>.jsonl`
-//! Override root: `PI_AGENT_HOME` env var
+//! or, when using the `omp` (oh-my-pi) CLI binary, `~/.omp/agent/sessions/...`.
+//! Override root: `OMP_HOME` first, then `PI_AGENT_HOME`.
+//!
+//! The same provider is exposed under two CLI aliases: `pi` and `omp`. Both
+//! resolve to the same reader/writer; only the on-disk home directory differs.
 //!
 //! ## JSONL format
 //!
@@ -44,15 +48,45 @@ pub struct PiAgent;
 
 impl PiAgent {
     /// Root directory for Pi-Agent session storage.
-    /// Respects `PI_AGENT_HOME` env var override.
+    ///
+    /// Resolution precedence:
+    /// 1. `$OMP_HOME` (oh-my-pi CLI)
+    /// 2. `$PI_AGENT_HOME` (legacy override)
+    /// 3. `~/.omp/agent` (default for the `omp` binary)
+    /// 4. `~/.pi/agent` (default for the original Pi Agent)
+    ///
+    /// The first path that *exists* wins when the env vars are unset, so
+    /// machines with both layouts installed pick the live one.
+    ///
+    /// `env_override` is used for testing; pass `None` in production.
     fn home_dir() -> PathBuf {
-        if let Ok(home) = std::env::var("PI_AGENT_HOME") {
-            return PathBuf::from(home);
+        Self::home_dir_impl(
+            std::env::var("OMP_HOME").ok(),
+            std::env::var("PI_AGENT_HOME").ok(),
+        )
+    }
+
+    /// Inner implementation factored out for testability without env-var
+    /// manipulation (which is `unsafe` on Rust 2024 nightly).
+    fn home_dir_impl(omp_home_env: Option<String>, pi_home_env: Option<String>) -> PathBuf {
+        if let Some(home) = omp_home_env {
+            let p = PathBuf::from(home);
+            if p.exists() {
+                return p;
+            }
         }
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".pi")
-            .join("agent")
+        if let Some(home) = pi_home_env {
+            let p = PathBuf::from(home);
+            if p.exists() {
+                return p;
+            }
+        }
+        let default_home = dirs::home_dir().unwrap_or_default();
+        let omp_home = default_home.join(".omp").join("agent");
+        if omp_home.exists() {
+            return omp_home;
+        }
+        default_home.join(".pi").join("agent")
     }
 
     /// Sessions directory under the home dir.
@@ -175,7 +209,10 @@ impl Provider for PiAgent {
         if !sessions.is_dir() {
             return None;
         }
-        // Walk to find a JSONL file whose stem matches the session_id.
+        // Walk to find a JSONL file whose stem ends with `_<session_id>`.
+        // omp files follow the pattern `<timestamp>_<uuid>.jsonl`, so the stem
+        // contains the session_id as the suffix after `_`.
+        let lookup_underscore = format!("_{session_id}");
         for entry in walkdir::WalkDir::new(&sessions)
             .into_iter()
             .filter_map(Result::ok)
@@ -192,7 +229,7 @@ impl Provider for PiAgent {
                 .path()
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .is_some_and(|s| s == session_id)
+                .is_some_and(|s| s == session_id || s.ends_with(&lookup_underscore))
             {
                 debug!(
                     provider = "pi-agent",
@@ -1136,5 +1173,42 @@ mod tests {
         assert_eq!(provider.name(), "Pi-Agent");
         assert_eq!(provider.slug(), "pi-agent");
         assert_eq!(provider.cli_alias(), "pi");
+    }
+
+    // -----------------------------------------------------------------------
+    // OMP_HOME env var support
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn home_dir_prefers_omp_home_env() {
+        // When OMP_HOME is set to an existing directory it wins.
+        let tmp = tempfile::tempdir().unwrap();
+        let omp_path = tmp.path().join("omp-home").to_string_lossy().to_string();
+        std::fs::create_dir_all(&omp_path).unwrap();
+
+        let resolved = PiAgent::home_dir_impl(Some(omp_path.clone()), None);
+        assert_eq!(resolved, std::path::PathBuf::from(&omp_path));
+    }
+
+    #[test]
+    fn home_dir_falls_back_to_pi_agent_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pi_path = tmp.path().join("pi-home").to_string_lossy().to_string();
+        std::fs::create_dir_all(&pi_path).unwrap();
+
+        let resolved = PiAgent::home_dir_impl(None, Some(pi_path.clone()));
+        assert_eq!(resolved, std::path::PathBuf::from(&pi_path));
+    }
+
+    #[test]
+    fn home_dir_omp_env_takes_precedence_over_pi_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let omp_path = tmp.path().join("omp-home").to_string_lossy().to_string();
+        let pi_path = tmp.path().join("pi-home").to_string_lossy().to_string();
+        std::fs::create_dir_all(&omp_path).unwrap();
+        std::fs::create_dir_all(&pi_path).unwrap();
+
+        let resolved = PiAgent::home_dir_impl(Some(omp_path.clone()), Some(pi_path.clone()));
+        assert_eq!(resolved, std::path::PathBuf::from(&omp_path));
     }
 }
