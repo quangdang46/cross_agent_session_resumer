@@ -227,6 +227,26 @@ impl OpenCode {
             .unwrap_or(false)
     }
 
+    /// Check whether a column exists on a table in the connected database.
+    /// Used to defensively add columns (e.g. `model` on `sessions`) that
+    /// newer opencode server versions expect but older per-project schemas
+    /// may not have.
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let pragma = format!("PRAGMA table_info({})", table);
+        conn.prepare(&pragma)
+            .and_then(|mut stmt| {
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let name: String = row.get(1)?;
+                    if name.eq_ignore_ascii_case(column) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .unwrap_or(false)
+    }
+
     /// Ensure core OpenCode tables exist.
     fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
         conn.execute_batch(
@@ -243,7 +263,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost REAL NOT NULL DEFAULT 0.0 CHECK (cost >= 0.0),
     updated_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    summary_message_id TEXT
+    summary_message_id TEXT,
+    model TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -934,6 +955,14 @@ impl Provider for OpenCode {
         // Explicitly delete any existing messages first — the FK cascade from
         // INSERT OR REPLACE is not guaranteed to fire on all SQLite versions
         // when foreign_keys = ON is set per-connection.
+        //
+        // The per-project `sessions` table is missing the `model` column that
+        // newer opencode server versions expect on resume
+        // (`Model not found: unknown/unknown` from `SessionPrompt.getModel`).
+        // Add the column defensively if it is not present.
+        if !Self::column_exists(&conn, "sessions", "model") {
+            let _ = conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", []);
+        }
         {
             let tx = conn.transaction().context("failed to begin transaction")?;
             tx.execute(
@@ -959,6 +988,22 @@ impl Provider for OpenCode {
                 ],
             )
             .context("failed to insert OpenCode session")?;
+            // Set the session-level `model` to the source session's model
+            // name (full `provider/model` form). Opencode's
+            // `SessionPrompt.getModel` reads this column to decide which
+            // model to use for the next turn on resume. Without it, the
+            // server falls back to `unknown/unknown` and rejects the
+            // session with `ProviderModelNotFoundError`.
+            let session_model: String = session
+                .model_name
+                .as_deref()
+                .filter(|m| !m.is_empty() && *m != "unknown")
+                .map(String::from)
+                .unwrap_or_else(|| "unknown".to_string());
+            let _ = tx.execute(
+                "UPDATE sessions SET model = ?1 WHERE id = ?2",
+                rusqlite::params![session_model, target_session_id],
+            );
             tx.commit()
                 .context("failed to commit session transaction")?;
         }
@@ -970,6 +1015,7 @@ impl Provider for OpenCode {
             session.workspace.as_deref().unwrap_or(Path::new("")),
             created_at,
             updated_at,
+            session.model_name.as_deref(),
             &session.messages,
         );
 
@@ -1036,7 +1082,27 @@ impl Provider for OpenCode {
                         t
                     }
                 };
-                let model = "unknown".to_string();
+                // Prefer the session-level model name (e.g.
+                // "opencode-go/deepseek-v4-flash") — the `provider/model`
+                // shape opencode's registry requires. Fall back to the
+                // per-message author (often a bare model name like
+                // "deepseek-v4-flash" when sourced from omp), and finally
+                // to "unknown" as a last resort. A literal "unknown" makes
+                // opencode reject the session on resume with
+                // `ProviderModelNotFoundError` even when the session-level
+                // model is valid.
+                let model: String = session
+                    .model_name
+                    .as_deref()
+                    .filter(|m| !m.is_empty() && *m != "unknown")
+                    .map(String::from)
+                    .or_else(|| {
+                        msg.author
+                            .as_deref()
+                            .filter(|m| !m.is_empty() && *m != "unknown")
+                            .map(String::from)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
 
                 tx.execute(
                     "INSERT INTO messages (
@@ -1406,9 +1472,25 @@ fn build_export_json(
     workspace: &Path,
     created_at: i64,
     updated_at: i64,
+    model_name: Option<&str>,
     messages: &[CanonicalMessage],
 ) -> serde_json::Value {
-    let model_info = serde_json::json!({"id": "unknown", "providerID": "unknown"});
+    // Derive `providerID` and `modelID` from the source session's model name.
+    // The source may store either `opencode-go/deepseek-v4-flash` (the full
+    // `provider/model` form opencode expects) or just `deepseek-v4-flash`
+    // (the bare model name). Split on the first `/`; fall back to "unknown"
+    // for both when no model name is available.
+    let (provider_id, model_id) = match model_name
+        .filter(|m| !m.is_empty() && *m != "unknown")
+        .and_then(|m| m.split_once('/'))
+    {
+        Some((prov, mdl)) => (prov.to_string(), mdl.to_string()),
+        None => (
+            "unknown".to_string(),
+            model_name.unwrap_or("unknown").to_string(),
+        ),
+    };
+    let model_info = serde_json::json!({"id": model_id, "providerID": provider_id});
 
     let mut export_messages: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
     let mut prev_msg_id: Option<String> = None;
@@ -1421,7 +1503,26 @@ fn build_export_json(
             "system" | "tool" => "assistant",
             other => other,
         };
-        let model = "unknown".to_string();
+        // Per-message model: prefer the assistant's bare model name (the
+        // "modelID" half of the provider/model pair). When the author or
+        // session-level model carries a `provider/model` prefix, strip the
+        // prefix so `modelID` does not contain a slash — opencode's model
+        // registry keys modelIDs without the provider.
+        let raw_model: String = msg
+            .author
+            .as_deref()
+            .filter(|m| !m.is_empty() && *m != "unknown")
+            .map(String::from)
+            .or_else(|| {
+                model_name
+                    .filter(|m| !m.is_empty() && *m != "unknown")
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let model: String = match raw_model.split_once('/') {
+            Some((_prov, mdl)) => mdl.to_string(),
+            None => raw_model,
+        };
 
         let mut parts: Vec<serde_json::Value> = Vec::new();
 
@@ -1522,22 +1623,27 @@ fn build_export_json(
                 "sessionID": target_session_id,
                 "agent": model,
                 "model": {
-                    "providerID": "unknown",
+                    "providerID": provider_id,
                     "modelID": model,
                 },
                 "summary": { "diffs": [] },
             })
         } else {
             let workspace_str = workspace.to_string_lossy().to_string();
+            // Native opencode writes assistant messages with FLAT
+            // `modelID` and `providerID` at the top level (verified against
+            // a real opencode session). The user message uses a nested
+            // `model: {providerID, modelID}` object instead. Stay
+            // consistent with the format the importer validates.
             serde_json::json!({
                 "role": "assistant",
                 "time": { "created": ts },
                 "id": msg_id,
                 "sessionID": target_session_id,
-                "agent": model,
                 "parentID": prev_msg_id.as_ref().unwrap_or(&msg_id),
+                "agent": model,
                 "modelID": model,
-                "providerID": "unknown",
+                "providerID": provider_id,
                 "mode": "code",
                 "path": {
                     "cwd": workspace_str,
@@ -2538,6 +2644,7 @@ mod tests {
             workspace,
             1_700_000_000_000,
             1_700_000_010_000,
+            Some("opencode-go/deepseek-v4-flash"),
             &[msg],
         );
 

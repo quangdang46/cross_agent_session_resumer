@@ -384,12 +384,16 @@ impl Provider for PiAgent {
                     });
                 }
                 "model_change" => {
+                    // omp emits the model identifier under "model" (not
+                    // "modelId") in `model_change` events. Accept both
+                    // for compatibility with older omp/pi-agent versions.
                     provider_name = val
                         .get("provider")
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     model_id = val
                         .get("modelId")
+                        .or_else(|| val.get("model"))
                         .and_then(|v| v.as_str())
                         .map(String::from);
                 }
