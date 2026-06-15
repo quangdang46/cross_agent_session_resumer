@@ -5,12 +5,17 @@
   "workspace": "/home/user/project",
   "title": "Write unit tests for the parser module",
   "message_count": 4,
-  "roles": ["User", "Assistant", "Tool", "Assistant"],
+  "roles": [
+    "User",
+    "Assistant",
+    "Tool",
+    "Assistant"
+  ],
   "started_at_present": true,
   "ended_at_present": true,
   "model_name": "claude-3-opus",
   "has_tool_calls": true,
-  "has_tool_results": false,
+  "has_tool_results": true,
   "known_lossy_fields": [],
-  "notes": "Pi-Agent JSONL with session header, toolResult role, and toolCall content blocks. Filename contains underscore as required."
+  "notes": "Pi-Agent JSONL with session header, toolResult role, and toolCall content blocks. Filename contains underscore as required. Updated: toolResult now populates tool_results (was empty vec before fix)."
 }
