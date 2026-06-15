@@ -231,33 +231,55 @@ impl Provider for PiAgent {
                 .and_then(|s| s.to_str())
                 .is_some_and(|s| s == session_id || s.ends_with(&lookup_underscore))
             {
-                // Verify this is actually a pi-agent/omp session by reading
-                // the first line and checking for type:"session" or
-                // type:"message". This prevents false matches when another
-                // provider (e.g. Claude Code) writes JSONL files with the
-                // same filename pattern into a directory that happens to
-                // live under our sessions root (e.g. a test env with
-                // CLAUDE_HOME set).
-                if let Ok(buf) = std::fs::read(entry.path())
+                // Verify this is actually a pi-agent/omp session by checking
+                // the file's first line has type "session" (the header line)
+                // or "message" (in case the session header was already
+                // consumed). Claude Code and other providers also write JSONL
+                // but their first line has type "user" or similar — pi-agent
+                // always starts with type "session".
+                match std::fs::read(entry.path())
                     .or_else(|_| std::fs::read_to_string(entry.path()).map(String::into_bytes))
                 {
-                    let max = buf.len().min(1024);
-                    let first_block = std::str::from_utf8(&buf[..max]).unwrap_or("");
-                    let first_line = first_block.lines().next().unwrap_or("");
-                    if let Ok(prelude) = serde_json::from_str::<serde_json::Value>(first_line) {
-                        let is_pi_agent = prelude
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .map(|t| t == "session" || t == "message")
-                            .unwrap_or(false);
-                        if !is_pi_agent {
-                            trace!(
-                                provider = "pi-agent",
-                                path = %entry.path().display(),
-                                "filename matches but content is not a pi-agent session — skipping"
-                            );
-                            continue;
+                    Ok(buf) => {
+                        let max = buf.len().min(1024);
+                        let first_block = std::str::from_utf8(&buf[..max]).unwrap_or("");
+                        let first_line = first_block.lines().next().unwrap_or("");
+                        match serde_json::from_str::<serde_json::Value>(first_line) {
+                            Ok(prelude) => {
+                                let is_pi_agent = prelude
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .map(|t| t == "session" || t == "message")
+                                    .unwrap_or(false);
+                                if !is_pi_agent {
+                                    trace!(
+                                        provider = "pi-agent",
+                                        path = %entry.path().display(),
+                                        first_type = ?prelude.get("type"),
+                                        "filename matches but content is not a pi-agent session — skipping"
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                trace!(
+                                    provider = "pi-agent",
+                                    path = %entry.path().display(),
+                                    error = %e,
+                                    "filename matches but first line is not valid JSON — skipping"
+                                );
+                                continue;
+                            }
                         }
+                    }
+                    Err(e) => {
+                        trace!(
+                            provider = "pi-agent",
+                            path = %entry.path().display(),
+                            error = %e,
+                            "filename matches but could not read file — skipping"
+                        );
+                        continue;
                     }
                 }
                 debug!(
