@@ -276,6 +276,24 @@ impl Cline {
             return Ok(root);
         }
 
+        // When CLINE_HOME is set but the path does not exist yet (e.g. a
+        // test temp dir that hasn't been created), prefer it over falling
+        // through to the error. The writer will create the directory tree.
+        if let Ok(home) = std::env::var("CLINE_HOME") {
+            let p = PathBuf::from(&home);
+            if !p.is_dir() {
+                // Return the path — the writer will create dirs as needed.
+                return Ok(p);
+            }
+        }
+        // Same for VSCODE_USER_DATA_DIR when set but not yet created.
+        if let Ok(ud) = std::env::var("VSCODE_USER_DATA_DIR") {
+            let p = PathBuf::from(&ud);
+            if !p.is_dir() {
+                return Ok(p);
+            }
+        }
+
         // Build an actionable error that lists every path we tried and the
         // env-var overrides the user can set. Users with non-default VS Code
         // installs (portable mode, --user-data-dir) routinely hit the bare
