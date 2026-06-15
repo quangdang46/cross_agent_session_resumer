@@ -68,25 +68,39 @@ impl PiAgent {
 
     /// Inner implementation factored out for testability without env-var
     /// manipulation (which is `unsafe` on Rust 2024 nightly).
+    ///
+    /// When `OMP_HOME` or `PI_AGENT_HOME` is set but the path does not
+    /// exist, the implementation returns a non-existent path rather than
+    /// falling through to the default `~/.omp/agent` or `~/.pi/agent`.
+    /// This prevents test isolation leaks where the test sets an env var
+    /// pointing to a temp dir (which exists only after the first write)
+    /// but the fallback picks up a real installation on the runner.
     fn home_dir_impl(omp_home_env: Option<String>, pi_home_env: Option<String>) -> PathBuf {
-        if let Some(home) = omp_home_env {
+        if let Some(ref home) = omp_home_env {
             let p = PathBuf::from(home);
             if p.exists() {
                 return p;
             }
         }
-        if let Some(home) = pi_home_env {
+        if let Some(ref home) = pi_home_env {
             let p = PathBuf::from(home);
             if p.exists() {
                 return p;
             }
         }
-        let default_home = dirs::home_dir().unwrap_or_default();
-        let omp_home = default_home.join(".omp").join("agent");
-        if omp_home.exists() {
-            return omp_home;
+        // Only check default paths when NO env override was supplied.
+        let has_override = omp_home_env.is_some() || pi_home_env.is_some();
+        if !has_override {
+            let default_home = dirs::home_dir().unwrap_or_default();
+            let omp_home = default_home.join(".omp").join("agent");
+            if omp_home.exists() {
+                return omp_home;
+            }
+            return default_home.join(".pi").join("agent");
         }
-        default_home.join(".pi").join("agent")
+        // Env var was set but the path does not exist — return a sentinel
+        // that will cause detect() / owns_session() to short-circuit.
+        PathBuf::from("/dev/null/pi-agent-does-not-exist")
     }
 
     /// Sessions directory under the home dir.
