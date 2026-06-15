@@ -701,14 +701,24 @@ fn writer_codex_tool_calls_in_response_content() {
         .filter(|l| l["type"] == "response_item")
         .collect();
 
-    // First response_item should have tool_use in its content blocks.
-    let first_content = response_items[0]["payload"]["content"]
+    // First response_item should be a function_call payload (Codex native format).
+    assert_eq!(
+        response_items[0]["payload"]["type"], "function_call",
+        "Codex response_item should contain function_call payload for tool calls"
+    );
+    assert_eq!(response_items[0]["payload"]["name"], "Read");
+
+    // The message response_item should have content as an array of text blocks.
+    let msg_item = response_items
+        .iter()
+        .find(|l| l["payload"]["type"] == "message")
+        .expect("Codex should have a message response_item");
+    let msg_content = msg_item["payload"]["content"]
         .as_array()
-        .expect("Codex response_item content should be array");
-    let has_tool_use = first_content.iter().any(|b| b["type"] == "tool_use");
+        .expect("Codex response_item message content should be array");
     assert!(
-        has_tool_use,
-        "Codex response_item should contain tool_use block"
+        msg_content.iter().any(|b| b["type"] == "output_text"),
+        "Codex response_item message content should contain output_text block"
     );
 }
 
