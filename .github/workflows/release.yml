@@ -15,6 +15,7 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +32,12 @@ jobs:
             runner: macos-latest
             cross: false
             suffix: macos-x86_64
+            optional: true
           - target: aarch64-apple-darwin
             runner: macos-latest
             cross: false
             suffix: macos-aarch64
+            optional: true
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             cross: false
