@@ -70,37 +70,39 @@ impl PiAgent {
     /// manipulation (which is `unsafe` on Rust 2024 nightly).
     ///
     /// When `OMP_HOME` or `PI_AGENT_HOME` is set but the path does not
-    /// exist, the implementation returns a non-existent path rather than
-    /// falling through to the default `~/.omp/agent` or `~/.pi/agent`.
-    /// This prevents test isolation leaks where the test sets an env var
-    /// pointing to a temp dir (which exists only after the first write)
-    /// but the fallback picks up a real installation on the runner.
+    /// exist, we still return the targeted path so that `detect()` can
+    /// correctly report `installed=false` (the `sessions/` subdir won't
+    /// exist either) and `write_session` can create the directory tree.
+    /// The critical guard is in `sessions_dir`: it checks `sessions.is_dir()`
+    /// and falls back to the home dir, NOT to other providers' roots.
+    /// This prevents the env-var leak that was the actual bug — previously,
+    /// when an env var pointed to a non-existent dir, the method fell
+    /// through to `~/.omp/agent/` and discovered live session files there
+    /// that belonged to unrelated session IDs.
     fn home_dir_impl(omp_home_env: Option<String>, pi_home_env: Option<String>) -> PathBuf {
         if let Some(ref home) = omp_home_env {
             let p = PathBuf::from(home);
             if p.exists() {
                 return p;
             }
+            // Env var is set but path does not exist — still use it as the
+            // target path so the writer can create it. Ownership checks will
+            // short-circuit via sessions_dir.is_dir().
+            return p;
         }
         if let Some(ref home) = pi_home_env {
             let p = PathBuf::from(home);
             if p.exists() {
                 return p;
             }
+            return p;
         }
-        // Only check default paths when NO env override was supplied.
-        let has_override = omp_home_env.is_some() || pi_home_env.is_some();
-        if !has_override {
-            let default_home = dirs::home_dir().unwrap_or_default();
-            let omp_home = default_home.join(".omp").join("agent");
-            if omp_home.exists() {
-                return omp_home;
-            }
-            return default_home.join(".pi").join("agent");
+        let default_home = dirs::home_dir().unwrap_or_default();
+        let omp_home = default_home.join(".omp").join("agent");
+        if omp_home.exists() {
+            return omp_home;
         }
-        // Env var was set but the path does not exist — return a sentinel
-        // that will cause detect() / owns_session() to short-circuit.
-        PathBuf::from("/dev/null/pi-agent-does-not-exist")
+        default_home.join(".pi").join("agent")
     }
 
     /// Sessions directory under the home dir.
