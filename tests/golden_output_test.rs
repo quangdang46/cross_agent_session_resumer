@@ -785,21 +785,23 @@ mod codex_golden {
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
 
-        // Find the assistant response_item with the tool call.
-        let tool_response = lines
+        // Find the function_call response_item.
+        let fn_call = lines
+            .iter()
+            .find(|e| e["type"] == "response_item" && e["payload"]["type"] == "function_call")
+            .expect("should have a function_call response_item");
+
+        assert_eq!(fn_call["payload"]["name"], "Read");
+        assert_eq!(fn_call["payload"]["call_id"], "call-1");
+
+        // Find the matching function_call_output.
+        let fn_output = lines
             .iter()
             .find(|e| {
-                e["type"] == "response_item"
-                    && e["payload"]["content"]
-                        .as_array()
-                        .is_some_and(|arr| arr.iter().any(|b| b["type"] == "tool_use"))
+                e["type"] == "response_item" && e["payload"]["type"] == "function_call_output"
             })
-            .expect("should have a response_item with tool_use");
-
-        let blocks = tool_response["payload"]["content"].as_array().unwrap();
-        let tu = blocks.iter().find(|b| b["type"] == "tool_use").unwrap();
-        assert_eq!(tu["name"], "Read");
-        assert_eq!(tu["id"], "call-1");
+            .expect("should have a function_call_output response_item");
+        assert_eq!(fn_output["payload"]["call_id"], "call-1");
     }
 
     #[test]
