@@ -1361,25 +1361,13 @@ fn build_parts(message: &CanonicalMessage) -> serde_json::Value {
         }));
     }
 
-    for result in &message.tool_results {
-        let tool_name = message
-            .tool_calls
-            .iter()
-            .find(|tc| tc.id == result.call_id)
-            .map(|tc| tc.name.as_str())
-            .unwrap_or("tool");
-        parts.push(serde_json::json!({
-            "type": "tool_result",
-            "data": {
-                "tool_call_id": result.call_id.clone().unwrap_or_default(),
-                "name": tool_name,
-                "content": result.content,
-                "metadata": "",
-                "is_error": result.is_error
-            }
-        }));
-    }
-
+    // Tool results from separate tool-role messages MUST NOT be emitted
+    // as independent parts here. Native opencode merges each tool call
+    // and its result into a single part with state.status "completed"
+    // (see the assistant-message block above for tool_calls that found a
+    // matching tool_result). Re-emittting them as separate tool_result
+    // parts creates duplicate entries (one "pending" call + one "completed"
+    // result) that the resume loop chokes on, producing UnknownError.
     serde_json::Value::Array(parts)
 }
 
@@ -1498,9 +1486,45 @@ fn build_export_json(
     };
     let model_info = serde_json::json!({"id": model_id, "providerID": provider_id});
 
-    let mut export_messages: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+    // Coalesce tool results into their originating assistant messages.
+    // omp/pi-agent sessions store tool calls and results as separate
+    // messages (assistant + tool roles). Native opencode requires both
+    // in the same message so the export produces a single part with
+    // state.status "completed" (input + output together). Collect all
+    // tool results first, then drain them into the matching assistant.
+    let mut tool_results_by_call_id: std::collections::HashMap<String, ToolResult> =
+        std::collections::HashMap::new();
+    for m in messages.iter().filter(|m| m.role == MessageRole::Tool) {
+        for tr in &m.tool_results {
+            if let Some(ref cid) = tr.call_id {
+                tool_results_by_call_id
+                    .entry(cid.clone())
+                    .or_insert_with(|| tr.clone());
+            }
+        }
+    }
+    let mut coalesced: Vec<CanonicalMessage> = messages.to_vec();
+    for m in coalesced
+        .iter_mut()
+        .filter(|m| m.role == MessageRole::Assistant)
+    {
+        if m.tool_results.is_empty() {
+            for tc in &m.tool_calls {
+                if let Some(tr) = tc
+                    .id
+                    .as_ref()
+                    .and_then(|cid| tool_results_by_call_id.remove(cid))
+                {
+                    m.tool_results.push(tr);
+                }
+            }
+        }
+    }
+    coalesced.retain(|m| m.role != MessageRole::Tool);
+
+    let mut export_messages: Vec<serde_json::Value> = Vec::with_capacity(coalesced.len());
     let mut prev_msg_id: Option<String> = None;
-    for msg in messages {
+    for msg in &coalesced {
         let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
         let ts = msg.timestamp.unwrap_or(created_at);
         // OpenCode import only accepts "user" and "assistant" roles.
@@ -1597,56 +1621,10 @@ fn build_export_json(
             }
         }
 
-        // Tool result parts (completed or error state).
-        for tr in &msg.tool_results {
-            let call_id = tr.call_id.clone().unwrap_or_default();
-            let tool_name = msg
-                .tool_calls
-                .iter()
-                .find(|tc| tc.id == tr.call_id)
-                .map(|tc| tc.name.as_str())
-                .unwrap_or("tool");
-            if tr.is_error {
-                parts.push(serde_json::json!({
-                    "type": "tool",
-                    "tool": tool_name,
-                    "callID": call_id,
-                    "state": {
-                        "status": "error",
-                        "input": serde_json::Value::Object(serde_json::Map::new()),
-                        "error": tr.content,
-                        "metadata": serde_json::Value::Object(serde_json::Map::new()),
-                        "time": {
-                            "start": ts,
-                            "end": ts,
-                        },
-                    },
-                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                    "sessionID": target_session_id,
-                    "messageID": msg_id,
-                }));
-            } else {
-                parts.push(serde_json::json!({
-                    "type": "tool",
-                    "tool": tool_name,
-                    "callID": call_id,
-                    "state": {
-                        "status": "completed",
-                        "input": serde_json::Value::Object(serde_json::Map::new()),
-                        "output": tr.content,
-                        "title": tool_name,
-                        "metadata": serde_json::Value::Object(serde_json::Map::new()),
-                        "time": {
-                            "start": ts,
-                            "end": ts,
-                        },
-                    },
-                    "id": format!("prt_{}", uuid::Uuid::new_v4()),
-                    "sessionID": target_session_id,
-                    "messageID": msg_id,
-                }));
-            }
-        }
+        // Tool result parts are NOT emitted here. They were already merged
+        // into the matching assistant tool_call part (the code above looks
+        // up msg.tool_results to find a matching result). Emitting them
+        // again creates duplicate parts that crash SessionPrompt.run.
 
         // Native OpenCode uses different schemas for User and Assistant
         // messages.  User messages nest model info in a "model" object;
@@ -1834,8 +1812,8 @@ fn opencode_import(session_id: &str, export: &serde_json::Value) -> anyhow::Resu
         );
     }
 
-    // Clean up temp file.
-    let _ = std::fs::remove_file(&tmp_path);
+    // KEEP TEMP for debugging
+    // let _ = std::fs::remove_file(&tmp_path);
 
     Ok(())
 }
@@ -2296,12 +2274,10 @@ mod tests {
         };
         let parts = build_parts(&msg);
         let arr = parts.as_array().expect("should be array");
-        assert_eq!(arr.len(), 3); // text + tool_call + tool_result
+        assert_eq!(arr.len(), 2); // text + tool_call (tool_result removed — merged into tool_call)
         assert_eq!(arr[0]["type"], "text");
         assert_eq!(arr[1]["type"], "tool_call");
         assert_eq!(arr[1]["data"]["name"], "Bash");
-        assert_eq!(arr[2]["type"], "tool_result");
-        assert!(!arr[2]["data"]["is_error"].as_bool().unwrap());
     }
 
     #[test]
@@ -2322,8 +2298,7 @@ mod tests {
         };
         let parts = build_parts(&msg);
         let arr = parts.as_array().expect("array");
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["type"], "tool_result");
+        assert_eq!(arr.len(), 0); // tool_result parts removed — merged into assistant
     }
 
     // ── workspace_from_db_path ──────────────────────────────────────────
