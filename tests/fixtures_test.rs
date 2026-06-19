@@ -9,6 +9,7 @@ use casr::model::{CanonicalSession, MessageRole};
 use casr::providers::Provider;
 use casr::providers::aider::Aider;
 use casr::providers::amp::Amp;
+use casr::providers::antigravity::Antigravity;
 use casr::providers::chatgpt::ChatGpt;
 use casr::providers::claude_code::ClaudeCode;
 use casr::providers::clawdbot::ClawdBot;
@@ -359,6 +360,82 @@ fn fixture_gmi_gemini_role() {
         .expect("gmi_gemini_role should parse");
     let expected = load_expected("gmi_gemini_role");
     assert_session_matches(&session, &expected, "gmi_gemini_role");
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity (agy) fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_agy_simple() {
+    let path = fixtures_dir()
+        .join("antigravity/antigravity-cli/conversations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.db");
+    let session = Antigravity
+        .read_session(&path)
+        .expect("agy_simple should parse");
+    let expected = load_expected("agy_simple");
+    assert_session_matches(&session, &expected, "agy_simple");
+
+    // Extra: the resume command must pin the mandated model and use --conversation.
+    let resume = Antigravity.resume_command(&session.session_id);
+    assert_eq!(
+        resume,
+        "agy --conversation aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee --model \"Gemini 3.1 Pro (High)\""
+    );
+
+    // Extra: the tool-only planner step extracted its tool call.
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|m| m.tool_calls.iter().any(|tc| tc.name == "view_file")),
+        "agy_simple should surface the view_file tool call"
+    );
+}
+
+/// Disambiguation: a legacy gmi `tmp/.../chats/session-*.json` sibling under the
+/// SAME `~/.gemini`-equivalent parent must NOT be enumerated by the agy provider.
+#[test]
+fn fixture_agy_does_not_list_legacy_gmi_sessions() {
+    let gemini_home = fixtures_dir().join("antigravity");
+    // SAFETY: env mutation in a test; casr fixture tests use HOME overrides.
+    unsafe {
+        std::env::set_var("GEMINI_HOME", &gemini_home);
+    }
+
+    let sessions = Antigravity
+        .list_sessions()
+        .expect("agy list_sessions returns Some");
+    let ids: Vec<String> = sessions.into_iter().map(|(id, _)| id).collect();
+
+    assert!(
+        ids.contains(&"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
+        "agy should list its own conversation uuid: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("gmi-legacy")),
+        "agy must NOT list the legacy gmi session: {ids:?}"
+    );
+
+    // And the gmi provider must NOT list the agy conversation uuid.
+    let gmi_sessions = Gemini
+        .list_sessions()
+        .expect("gmi list_sessions returns Some");
+    let gmi_ids: Vec<String> = gmi_sessions.into_iter().map(|(id, _)| id).collect();
+    assert!(
+        gmi_ids.contains(&"gmi-legacy-001".to_string()),
+        "gmi should list its own legacy session: {gmi_ids:?}"
+    );
+    assert!(
+        !gmi_ids
+            .iter()
+            .any(|id| id.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")),
+        "gmi must NOT list the agy conversation uuid: {gmi_ids:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("GEMINI_HOME");
+    }
 }
 
 // ---------------------------------------------------------------------------

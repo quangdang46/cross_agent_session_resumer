@@ -102,6 +102,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::claude_code::ClaudeCode),
             Box::new(crate::providers::codex::Codex),
             Box::new(crate::providers::gemini::Gemini),
+            Box::new(crate::providers::antigravity::Antigravity),
             Box::new(crate::providers::cursor::Cursor),
             Box::new(crate::providers::cline::Cline),
             Box::new(crate::providers::aider::Aider),
@@ -452,6 +453,7 @@ fn canonical_provider_token(token: &str) -> &str {
         "claude" => "claude-code",
         "codex-cli" => "codex",
         "gemini-cli" => "gemini",
+        "antigravity-cli" => "antigravity",
         _ => token,
     }
 }

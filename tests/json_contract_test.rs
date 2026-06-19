@@ -259,8 +259,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        14,
-        "should list 14 providers (CC, Codex, Gemini, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent)"
+        16,
+        "should list 16 providers (CC, Codex, Gemini, Antigravity, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent, Kiro)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -288,6 +288,7 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"claude-code"), "should contain claude-code");
     assert!(slugs.contains(&"codex"), "should contain codex");
     assert!(slugs.contains(&"gemini"), "should contain gemini");
+    assert!(slugs.contains(&"antigravity"), "should contain antigravity");
     assert!(slugs.contains(&"cursor"), "should contain cursor");
     assert!(slugs.contains(&"cline"), "should contain cline");
     assert!(slugs.contains(&"aider"), "should contain aider");
@@ -298,6 +299,7 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"factory"), "should contain factory");
     assert!(slugs.contains(&"openclaw"), "should contain openclaw");
     assert!(slugs.contains(&"pi-agent"), "should contain pi-agent");
+    assert!(slugs.contains(&"kiro"), "should contain kiro");
 }
 
 #[test]
@@ -323,6 +325,7 @@ fn contract_providers_aliases_match_slugs() {
             "claude-code" => assert_eq!(*alias, "cc"),
             "codex" => assert_eq!(*alias, "cod"),
             "gemini" => assert_eq!(*alias, "gmi"),
+            "antigravity" => assert_eq!(*alias, "agy"),
             "cursor" => assert_eq!(*alias, "cur"),
             "cline" => assert_eq!(*alias, "cln"),
             "aider" => assert_eq!(*alias, "aid"),
@@ -334,6 +337,7 @@ fn contract_providers_aliases_match_slugs() {
             "factory" => assert_eq!(*alias, "fac"),
             "openclaw" => assert_eq!(*alias, "ocl"),
             "pi-agent" => assert_eq!(*alias, "pi"),
+            "kiro" => assert_eq!(*alias, "kr"),
             other => panic!("Unexpected slug: {other}"),
         }
     }
@@ -1023,6 +1027,7 @@ fn contract_list_provider_field_matches_slug() {
         "claude-code",
         "codex",
         "gemini",
+        "antigravity",
         "cursor",
         "cline",
         "aider",
@@ -1034,6 +1039,7 @@ fn contract_list_provider_field_matches_slug() {
         "factory",
         "openclaw",
         "pi-agent",
+        "kiro",
     ];
     for item in items {
         let provider = item["provider"].as_str().unwrap();

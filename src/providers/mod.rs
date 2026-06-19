@@ -1,12 +1,13 @@
 //! Provider trait and concrete provider implementations.
 //!
-//! Each supported provider (Claude Code, Codex, Gemini CLI, Cursor, Cline,
-//! Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw,
-//! Pi-Agent, Kiro) implements the [`Provider`] trait to read/write sessions in
-//! its native format.
+//! Each supported provider (Claude Code, Codex, Gemini CLI, Antigravity CLI,
+//! Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory,
+//! OpenClaw, Pi-Agent, Kiro) implements the [`Provider`] trait to read/write
+//! sessions in its native format.
 
 pub mod aider;
 pub mod amp;
+pub mod antigravity;
 pub mod chatgpt;
 pub mod claude_code;
 pub mod clawdbot;

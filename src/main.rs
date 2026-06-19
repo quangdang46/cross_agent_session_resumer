@@ -24,8 +24,8 @@ use casr::responses::{
 
 /// Cross Agent Session Resumer — resume AI coding sessions across providers.
 ///
-/// Convert sessions between Claude Code, Codex, Gemini CLI, Cursor, Cline, Aider, Amp, OpenCode, and ChatGPT so you can
-/// pick up where you left off with a different agent.
+/// Convert sessions between Claude Code, Codex, Gemini CLI, Antigravity CLI, Cursor, Cline, Aider, Amp, OpenCode, and
+/// ChatGPT so you can pick up where you left off with a different agent.
 #[derive(Parser, Debug)]
 #[command(
     name = "casr",
@@ -54,7 +54,7 @@ struct Cli {
 enum Command {
     /// Convert and resume a session from another provider.
     Resume {
-        /// Target provider alias (cc, cod, gmi, cur, cln, aid, amp, opc, gpt).
+        /// Target provider alias (cc, cod, gmi, agy, cur, cln, aid, amp, opc, gpt).
         target: String,
         /// Session ID to convert.
         session_id: String,
@@ -183,6 +183,7 @@ fn init_tracing(cli: &Cli) {
 /// - `casr -cc <session-id> ...`
 /// - `casr -cod <session-id> ...`
 /// - `casr -gmi <session-id> ...`
+/// - `casr -agy <session-id> ...`
 ///
 /// Rewritten form:
 /// `casr [global-options] resume <target> <session-id> ...`
@@ -209,6 +210,7 @@ fn rewrite_shorthand_resume_args(args: Vec<OsString>) -> Vec<OsString> {
             "-cc" => Some("cc"),
             "-cod" => Some("cod"),
             "-gmi" => Some("gmi"),
+            "-agy" => Some("agy"),
             _ => None,
         };
 
