@@ -597,11 +597,9 @@ impl Provider for Hermes {
             }
         }
 
-        if let Some(db) = Self::db_path() {
-            if db.is_file() {
-                installed = true;
-                evidence.push(format!("{} detected", db.display()));
-            }
+        if let Some(db) = Self::db_path().filter(|db| db.is_file()) {
+            installed = true;
+            evidence.push(format!("{} detected", db.display()));
         }
 
         // Check for the hermes CLI binary as secondary evidence.
@@ -672,16 +670,16 @@ impl Provider for Hermes {
                 }
             }
             // No matching session — list available IDs for a helpful error.
-            if let Ok(ids) = Self::list_session_ids(path) {
-                if !ids.is_empty() {
-                    anyhow::bail!(
-                        "Hermes DB at {} contains {} session(s). To read one, use \
+            if let Ok(ids) = Self::list_session_ids(path)
+                && !ids.is_empty()
+            {
+                anyhow::bail!(
+                    "Hermes DB at {} contains {} session(s). To read one, use \
                          virtual path format `<db>#<session-id>`. Available IDs: {}",
-                        path.display(),
-                        ids.len(),
-                        ids.join(", "),
-                    );
-                }
+                    path.display(),
+                    ids.len(),
+                    ids.join(", "),
+                );
             }
         }
 
@@ -761,6 +759,7 @@ mod tests {
     use std::path::PathBuf;
 
     /// Create a test Hermes DB with the given session and return the Db path.
+    #[allow(clippy::type_complexity)]
     fn create_test_db(
         session_id: &str,
         source: &str,
