@@ -109,16 +109,17 @@ impl Hermes {
 
     /// Open a connection to the Hermes state database.
     fn open_db(db_path: &Path) -> anyhow::Result<rusqlite::Connection> {
-        let conn = rusqlite::Connection::open(db_path)
-            .with_context(|| format!("failed to open Hermes state database: {}", db_path.display()))?;
+        let conn = rusqlite::Connection::open(db_path).with_context(|| {
+            format!(
+                "failed to open Hermes state database: {}",
+                db_path.display()
+            )
+        })?;
         Ok(conn)
     }
 
     /// Read a single session from the Hermes SQLite database.
-    fn read_session_from_db(
-        db_path: &Path,
-        session_id: &str,
-    ) -> anyhow::Result<CanonicalSession> {
+    fn read_session_from_db(db_path: &Path, session_id: &str) -> anyhow::Result<CanonicalSession> {
         debug!(db = %db_path.display(), session_id, "reading Hermes session from DB");
         let conn = Self::open_db(db_path)?;
 
@@ -142,18 +143,34 @@ impl Hermes {
                     let output_tokens: Option<i64> = row.get("output_tokens")?;
                     let reasoning_tokens: Option<i64> = row.get("reasoning_tokens")?;
                     Ok((
-                        id, source, model, cwd, title,
-                        started_at, ended_at, message_count,
-                        input_tokens, output_tokens, reasoning_tokens,
+                        id,
+                        source,
+                        model,
+                        cwd,
+                        title,
+                        started_at,
+                        ended_at,
+                        message_count,
+                        input_tokens,
+                        output_tokens,
+                        reasoning_tokens,
                     ))
                 },
             )
             .with_context(|| format!("session not found in Hermes DB: {session_id}"))?;
 
         let (
-            id, _source, model, cwd, title,
-            started_at_f, ended_at_f, _message_count,
-            input_tokens, output_tokens, reasoning_tokens,
+            id,
+            _source,
+            model,
+            cwd,
+            title,
+            started_at_f,
+            ended_at_f,
+            _message_count,
+            input_tokens,
+            output_tokens,
+            reasoning_tokens,
         ) = session_row;
 
         // Read messages (active only — soft-deleted / rewound messages are excluded).
@@ -179,8 +196,15 @@ impl Hermes {
                 let reasoning: Option<String> = row.get("reasoning")?;
                 let reasoning_content: Option<String> = row.get("reasoning_content")?;
                 Ok((
-                    msg_id, role, content, tool_call_id, tool_calls_str,
-                    tool_name, timestamp, reasoning, reasoning_content,
+                    msg_id,
+                    role,
+                    content,
+                    tool_call_id,
+                    tool_calls_str,
+                    tool_name,
+                    timestamp,
+                    reasoning,
+                    reasoning_content,
                 ))
             })
             .with_context(|| "failed to query messages")?;
@@ -188,8 +212,15 @@ impl Hermes {
         let mut messages: Vec<CanonicalMessage> = Vec::new();
         for msg_row in msg_rows {
             let (
-                _msg_id, role_str, content, tool_call_id, tool_calls_str,
-                tool_name, timestamp_f, reasoning, reasoning_content,
+                _msg_id,
+                role_str,
+                content,
+                tool_call_id,
+                tool_calls_str,
+                tool_name,
+                timestamp_f,
+                reasoning,
+                reasoning_content,
             ) = msg_row?;
 
             let role = normalize_role(&role_str);
@@ -242,12 +273,14 @@ impl Hermes {
             // Reasoning content in messages table marks model-internal thinking.
             // Tag those with author="reasoning" so the pipeline can optionally
             // drop them during cross-provider conversion.
-            let effective_author =
-                if reasoning_content.as_deref().is_some_and(|rc| !rc.trim().is_empty()) {
-                    Some("reasoning".to_string())
-                } else {
-                    author
-                };
+            let effective_author = if reasoning_content
+                .as_deref()
+                .is_some_and(|rc| !rc.trim().is_empty())
+            {
+                Some("reasoning".to_string())
+            } else {
+                author
+            };
 
             // Build extra metadata with Hermes-specific fields.
             let mut extra = serde_json::Map::new();
@@ -287,16 +320,10 @@ impl Hermes {
             serde_json::Value::String("hermes".to_string()),
         );
         if let Some(it) = input_tokens {
-            metadata.insert(
-                "input_tokens".into(),
-                serde_json::Value::Number(it.into()),
-            );
+            metadata.insert("input_tokens".into(), serde_json::Value::Number(it.into()));
         }
         if let Some(ot) = output_tokens {
-            metadata.insert(
-                "output_tokens".into(),
-                serde_json::Value::Number(ot.into()),
-            );
+            metadata.insert("output_tokens".into(), serde_json::Value::Number(ot.into()));
         }
         if let Some(rt) = reasoning_tokens {
             metadata.insert(
@@ -440,9 +467,7 @@ impl Hermes {
         let started_at_f = session
             .started_at
             .map(|ms| ms as f64 / 1000.0)
-            .unwrap_or_else(|| {
-                chrono::Utc::now().timestamp() as f64
-            });
+            .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
         let ended_at_f = session.ended_at.map(|ms| ms as f64 / 1000.0);
 
         let title_str = session
@@ -631,10 +656,7 @@ impl Provider for Hermes {
 
         // Bare DB path without a virtual session ID — try to infer which
         // session was meant from the filename stem (for direct `--source` usage).
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if !stem.is_empty() && path.is_file() {
             let conn = Self::open_db(path).ok();
             if let Some(conn) = conn {
@@ -683,28 +705,22 @@ impl Provider for Hermes {
         })?;
 
         // Use caller-supplied ID when available, otherwise derive one.
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(|| {
-                // Deterministic ID based on timestamp.
-                let now = chrono::Utc::now();
-                format!(
-                    "{}-{}{}",
-                    now.format("%Y%m%dT%H%M%S"),
-                    &uuid::Uuid::new_v4().to_string()[..8],
-                    CASR_ID_SUFFIX,
-                )
-            });
+        let target_session_id = opts.target_session_id.clone().unwrap_or_else(|| {
+            // Deterministic ID based on timestamp.
+            let now = chrono::Utc::now();
+            format!(
+                "{}-{}{}",
+                now.format("%Y%m%dT%H%M%S"),
+                &uuid::Uuid::new_v4().to_string()[..8],
+                CASR_ID_SUFFIX,
+            )
+        });
 
         Self::write_session_to_db(&db_path, session, &target_session_id)?;
 
         let virtual_path = Self::build_virtual_path(&db_path, &target_session_id);
 
-        debug!(
-            session_id = target_session_id,
-            "Hermes session written"
-        );
+        debug!(session_id = target_session_id, "Hermes session written");
 
         Ok(WrittenSession {
             paths: vec![virtual_path],
@@ -781,14 +797,7 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (id, source, model, cwd, title, started_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                session_id,
-                source,
-                model,
-                cwd,
-                title,
-                started_at,
-            ],
+            rusqlite::params![session_id, source, model, cwd, title, started_at,],
         )
         .expect("insert session");
 
@@ -841,10 +850,7 @@ mod tests {
 
     #[test]
     fn resume_command() {
-        assert_eq!(
-            Hermes.resume_command("abc-123"),
-            "hermes --resume abc-123"
-        );
+        assert_eq!(Hermes.resume_command("abc-123"), "hermes --resume abc-123");
     }
 
     // -----------------------------------------------------------------------
@@ -874,7 +880,10 @@ mod tests {
         // Ensure a hash in the filename doesn't confuse parsing.
         let vpath = PathBuf::from("/home/user/.hermes/state#1.db#session-001");
         let (parsed_db, parsed_sid) = Hermes::parse_virtual_path(&vpath);
-        assert_eq!(parsed_db.display().to_string(), "/home/user/.hermes/state#1.db");
+        assert_eq!(
+            parsed_db.display().to_string(),
+            "/home/user/.hermes/state#1.db"
+        );
         assert_eq!(parsed_sid, Some("session-001".to_string()));
     }
 
@@ -1011,14 +1020,8 @@ mod tests {
         assert_eq!(session.messages[0].content, "Hello Hermes!");
         assert_eq!(session.messages[1].role, MessageRole::Assistant);
         assert_eq!(session.messages[1].content, "Hi there!");
-        assert_eq!(
-            session.workspace,
-            Some(PathBuf::from("/data/project"))
-        );
-        assert_eq!(
-            session.model_name.as_deref(),
-            Some("claude-3.5-sonnet")
-        );
+        assert_eq!(session.workspace, Some(PathBuf::from("/data/project")));
+        assert_eq!(session.model_name.as_deref(), Some("claude-3.5-sonnet"));
         assert!(session.started_at.is_some());
     }
 
@@ -1053,7 +1056,9 @@ mod tests {
         let (_tmp, db_path) = create_test_db(
             "session-003",
             "cli",
-            None, None, None,
+            None,
+            None,
+            None,
             Some(1_700_000_000.0),
             &messages,
         );
@@ -1097,10 +1102,7 @@ mod tests {
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[1].tool_calls.len(), 1);
         assert_eq!(session.messages[1].tool_calls[0].name, "Bash");
-        assert_eq!(
-            session.messages[1].tool_calls[0].arguments["command"],
-            "ls"
-        );
+        assert_eq!(session.messages[1].tool_calls[0].arguments["command"], "ls");
     }
 
     #[test]
@@ -1108,13 +1110,7 @@ mod tests {
         let messages = vec![
             (1, "user", "Run command", None, None),
             (2, "assistant", "Running", None, None),
-            (
-                3,
-                "tool",
-                "{\"stdout\": \"done\"}",
-                None,
-                Some("call-1"),
-            ),
+            (3, "tool", "{\"stdout\": \"done\"}", None, Some("call-1")),
         ];
         let (_tmp, db_path) = create_test_db(
             "session-005",
@@ -1135,10 +1131,7 @@ mod tests {
             .find(|m| m.role == MessageRole::Tool)
             .expect("should have a tool message");
         assert_eq!(tool_msg.tool_results.len(), 1);
-        assert_eq!(
-            tool_msg.tool_results[0].call_id.as_deref(),
-            Some("call-1")
-        );
+        assert_eq!(tool_msg.tool_results[0].call_id.as_deref(), Some("call-1"));
         assert!(tool_msg.content.contains("done"));
     }
 
@@ -1179,7 +1172,6 @@ mod tests {
                 [],
             )
             .expect("insert inactive msg");
-
         }
 
         let vpath = Hermes::build_virtual_path(&db_path, "s1");
@@ -1194,7 +1186,9 @@ mod tests {
         let (_tmp, db_path) = create_test_db(
             "session-empty",
             "cli",
-            None, None, None,
+            None,
+            None,
+            None,
             Some(1_700_000_000.0),
             &[],
         );
@@ -1211,10 +1205,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("state.db");
         let conn = rusqlite::Connection::open(&db_path).expect("open db");
-        conn.execute_batch(
-            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT);",
-        )
-        .expect("create table");
+        conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT);")
+            .expect("create table");
 
         let vpath = Hermes::build_virtual_path(&db_path, "nonexistent");
         let err = Hermes.read_session(&vpath).unwrap_err();
@@ -1230,10 +1222,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("state.db");
         let conn = rusqlite::Connection::open(&db_path).expect("open db");
-        conn.execute_batch(
-            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT);",
-        )
-        .expect("create table");
+        conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT);")
+            .expect("create table");
 
         let err = Hermes.read_session(&db_path).unwrap_err();
         let msg = format!("{err}");
@@ -1245,12 +1235,13 @@ mod tests {
 
     #[test]
     fn reader_bare_db_path_with_existing_session_id_match() {
-        let messages = vec![
-            (1, "user", "Hello", None, None),
-        ];
+        let messages = vec![(1, "user", "Hello", None, None)];
         let (_tmp, db_path) = create_test_db(
-            "state",  // session ID == filename stem
-            "cli", None, None, None,
+            "state", // session ID == filename stem
+            "cli",
+            None,
+            None,
+            None,
             Some(1_700_000_000.0),
             &messages,
         );
@@ -1304,12 +1295,13 @@ mod tests {
 
         assert_eq!(written.session_id, "test-written-session");
         assert_eq!(written.paths.len(), 1);
-        assert_eq!(written.resume_command, "hermes --resume test-written-session");
+        assert_eq!(
+            written.resume_command,
+            "hermes --resume test-written-session"
+        );
 
         // Verify the DB was created and the session is readable.
-        let readback = Hermes
-            .read_session(&written.paths[0])
-            .expect("readback");
+        let readback = Hermes.read_session(&written.paths[0]).expect("readback");
         assert_eq!(readback.messages.len(), 2);
         assert_eq!(readback.messages[0].content, "Hello from writer");
         assert_eq!(readback.messages[1].content, "Hello back");
@@ -1356,37 +1348,37 @@ mod tests {
                     platform_message_id TEXT, observed INTEGER DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1, compacted INTEGER NOT NULL DEFAULT 0
                 );",
+        )
+        .expect("create full schema");
+
+        let session = make_canonical_session(vec![CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "Test on existing DB".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        }]);
+
+        let written = Hermes
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: Some("existing-db-test".to_string()),
+                },
             )
-            .expect("create full schema");
+            .expect("write_session on existing DB");
 
-            let session = make_canonical_session(vec![CanonicalMessage {
-                idx: 0,
-                role: MessageRole::User,
-                content: "Test on existing DB".to_string(),
-                timestamp: Some(1_700_000_000_000),
-                author: None,
-                tool_calls: vec![],
-                tool_results: vec![],
-                extra: serde_json::Value::Null,
-            }]);
+        assert_eq!(written.session_id, "existing-db-test");
 
-            let written = Hermes
-                .write_session(
-                    &session,
-                    &WriteOptions {
-                        force: false,
-                        target_session_id: Some("existing-db-test".to_string()),
-                    },
-                )
-                .expect("write_session on existing DB");
-
-            assert_eq!(written.session_id, "existing-db-test");
-
-            // Read back.
-            let readback = Hermes
-                .read_session(&written.paths[0])
-                .expect("readback from existing DB");
-            assert_eq!(readback.messages[0].content, "Test on existing DB");
+        // Read back.
+        let readback = Hermes
+            .read_session(&written.paths[0])
+            .expect("readback from existing DB");
+        assert_eq!(readback.messages[0].content, "Test on existing DB");
     }
 
     #[test]
@@ -1394,38 +1386,36 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _guard = set_test_home(tmp.path());
         let session = make_canonical_session(vec![CanonicalMessage {
-                idx: 0,
-                role: MessageRole::Assistant,
-                content: "Let me check".to_string(),
-                timestamp: Some(1_700_000_000_000),
-                author: None,
-                tool_calls: vec![ToolCall {
-                    id: Some("tc-1".to_string()),
-                    name: "Bash".to_string(),
-                    arguments: json!({"command": "ls -la"}),
-                }],
-                tool_results: vec![],
-                extra: serde_json::Value::Null,
-            }]);
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "Let me check".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: None,
+            tool_calls: vec![ToolCall {
+                id: Some("tc-1".to_string()),
+                name: "Bash".to_string(),
+                arguments: json!({"command": "ls -la"}),
+            }],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        }]);
 
-            let written = Hermes
-                .write_session(
-                    &session,
-                    &WriteOptions {
-                        force: false,
-                        target_session_id: Some("tool-call-test".to_string()),
-                    },
-                )
-                .expect("write_session");
+        let written = Hermes
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: Some("tool-call-test".to_string()),
+                },
+            )
+            .expect("write_session");
 
-            let readback = Hermes
-                .read_session(&written.paths[0])
-                .expect("readback");
-            assert_eq!(readback.messages[0].tool_calls.len(), 1);
-            assert_eq!(readback.messages[0].tool_calls[0].name, "Bash");
-            assert_eq!(
-                readback.messages[0].tool_calls[0].arguments["command"],
-                "ls -la"
-            );
+        let readback = Hermes.read_session(&written.paths[0]).expect("readback");
+        assert_eq!(readback.messages[0].tool_calls.len(), 1);
+        assert_eq!(readback.messages[0].tool_calls[0].name, "Bash");
+        assert_eq!(
+            readback.messages[0].tool_calls[0].arguments["command"],
+            "ls -la"
+        );
     }
 }
