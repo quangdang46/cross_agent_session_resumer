@@ -54,7 +54,7 @@ struct Cli {
 enum Command {
     /// Convert and resume a session from another provider.
     Resume {
-        /// Target provider alias (cc, cod, gmi, cur, cln, aid, amp, opc, gpt, cwb, vib, fac, ocl, kr, jc, pi, omp).
+        /// Target provider alias (cc, cod, gmi, cur, cln, aid, amp, opc, gpt, cwb, vib, fac, ocl, kr, jc, pi, omp, her).
         target: String,
         /// Session ID to convert.
         session_id: String,
@@ -207,6 +207,7 @@ fn rewrite_shorthand_resume_args(args: Vec<OsString>) -> Vec<OsString> {
             "-gmi" => Some("gmi"),
             "-jc" => Some("jc"),
             "-kr" => Some("kr"),
+            "-her" => Some("her"),
             "-opc" => Some("opencode"),
             _ => None,
         };

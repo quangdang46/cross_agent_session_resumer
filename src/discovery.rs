@@ -114,6 +114,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::vibe::Vibe),
             Box::new(crate::providers::factory::Factory),
             Box::new(crate::providers::openclaw::OpenClaw),
+            Box::new(crate::providers::hermes::Hermes),
             Box::new(crate::providers::pi_agent::PiAgent),
         ])
     }
@@ -455,6 +456,8 @@ fn canonical_provider_token(token: &str) -> &str {
         "gemini-cli" => "gemini",
         // omp (oh-my-pi) CLI — same JSONL format as pi-agent.
         "omp" => "pi-agent",
+        // Hermes.
+        "hermes" => "hermes",
         _ => token,
     }
 }
@@ -1071,7 +1074,7 @@ mod tests {
 
         let mut expected: Vec<String> = vec![
             "cc", "cod", "gmi", "cur", "cln", "aid", "amp", "opc", "gpt", "cwb", "vib", "fac",
-            "ocl", "kr", "jc", "pi",
+            "ocl", "kr", "jc", "pi", "her",
         ]
         .into_iter()
         .map(String::from)

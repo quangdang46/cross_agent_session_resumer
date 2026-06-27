@@ -15,6 +15,7 @@ pub mod codex;
 pub mod cursor;
 pub mod factory;
 pub mod gemini;
+pub mod hermes;
 pub mod jcode;
 pub mod kiro;
 pub mod openclaw;
