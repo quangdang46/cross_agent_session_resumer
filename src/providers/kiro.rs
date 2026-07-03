@@ -453,6 +453,7 @@ impl Provider for Kiro {
             session_id: target_session_id.clone(),
             resume_command: self.resume_command(&target_session_id),
             backup_path,
+            warnings: Vec::new(),
         })
     }
 

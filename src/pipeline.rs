@@ -417,6 +417,7 @@ but resume may fail until the CLI is installed.",
                     session_id: canonical.session_id.clone(),
                     resume_command: target_provider.resume_command(&canonical.session_id),
                     backup_path: None,
+                    warnings: Vec::new(),
                 }),
                 warnings: all_warnings,
             });
@@ -500,6 +501,9 @@ but resume may fail until the CLI is installed.",
             resume_command = written.resume_command,
             "session written"
         );
+        // Surface any non-fatal writer warnings (e.g. the target session was
+        // written but could not be registered in the provider's resume index).
+        all_warnings.extend(written.warnings.iter().cloned());
 
         // 9. Read-back verification.
         if let Some(first_path) = written.paths.first() {

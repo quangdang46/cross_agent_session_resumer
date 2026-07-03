@@ -665,6 +665,7 @@ impl Provider for Amp {
             session_id: thread_id.clone(),
             resume_command: self.resume_command(&thread_id),
             backup_path: outcome.backup_path,
+            warnings: Vec::new(),
         })
     }
 

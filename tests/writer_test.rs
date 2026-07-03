@@ -465,6 +465,170 @@ fn writer_codex_output_valid_jsonl() {
     }
 }
 
+/// The real Codex 0.142.5 `threads` schema. Used as a fixture so the
+/// registration test exercises the exact NOT NULL / default constraints and
+/// column set casr must satisfy on a live database. Keep in sync with
+/// `sqlite3 ~/.codex/state_5.sqlite '.schema threads'`.
+const CODEX_THREADS_SCHEMA: &str = r#"
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT,
+    cli_version TEXT NOT NULL DEFAULT '',
+    first_user_message TEXT NOT NULL DEFAULT '',
+    agent_nickname TEXT,
+    agent_role TEXT,
+    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+    model TEXT,
+    reasoning_effort TEXT,
+    agent_path TEXT,
+    created_at_ms INTEGER,
+    updated_at_ms INTEGER,
+    thread_source TEXT,
+    preview TEXT NOT NULL DEFAULT '',
+    recency_at INTEGER NOT NULL DEFAULT 0,
+    recency_at_ms INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
+/// Regression for issue #16: `codex resume <id>` looks the session up in
+/// `~/.codex/state_*.sqlite` (`threads` table), not by scanning JSONL. After a
+/// CC→Codex conversion, casr must register a `threads` row for the converted
+/// session pointing at the rollout file.
+#[test]
+fn writer_codex_registers_thread_in_state_db() {
+    let _lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CODEX_HOME", tmp.path());
+
+    // Seed a state_5.sqlite with the real threads schema.
+    let db_path = tmp.path().join("state_5.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(CODEX_THREADS_SCHEMA).unwrap();
+    }
+
+    let session = simple_session();
+    let written = Codex
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("Codex write_session should succeed");
+
+    assert!(
+        written.warnings.is_empty(),
+        "registration should succeed without warnings, got: {:?}",
+        written.warnings
+    );
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM threads WHERE id = ?1",
+            [&written.session_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "exactly one threads row for the converted session"
+    );
+
+    let (rollout_path, cwd, thread_source): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT rollout_path, cwd, thread_source FROM threads WHERE id = ?1",
+            [&written.session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+
+    assert!(
+        std::path::Path::new(&rollout_path).is_absolute(),
+        "rollout_path must be absolute: {rollout_path}"
+    );
+    assert_eq!(
+        rollout_path,
+        written.paths[0].to_string_lossy(),
+        "threads.rollout_path must point at the written rollout file"
+    );
+    assert_eq!(
+        cwd, "/data/projects/myapp",
+        "threads.cwd must be the workspace"
+    );
+    assert_eq!(
+        thread_source.as_deref(),
+        Some("user"),
+        "threads.thread_source must be 'user'"
+    );
+}
+
+/// A missing Codex state DB must not fail the write; the rollout is still
+/// produced and a clear warning is surfaced.
+#[test]
+fn writer_codex_missing_state_db_warns_but_still_writes() {
+    let _lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CODEX_HOME", tmp.path());
+    // No state_*.sqlite present.
+
+    let written = Codex
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .expect("write should still succeed without a state DB");
+
+    assert!(written.paths[0].exists(), "rollout file should be written");
+    assert!(
+        !written.warnings.is_empty(),
+        "a missing state DB should surface a warning"
+    );
+    assert!(
+        written.warnings.iter().any(|w| w.contains("state_")),
+        "warning should mention the missing state DB: {:?}",
+        written.warnings
+    );
+}
+
+/// The session_meta payload must carry both `id` and `session_id` (Codex reads
+/// one or the other depending on version).
+#[test]
+fn writer_codex_session_meta_has_both_id_and_session_id() {
+    let _lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CODEX_HOME", tmp.path());
+
+    let written = Codex
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+
+    let id = meta["payload"]["id"].as_str().expect("payload.id");
+    let session_id = meta["payload"]["session_id"]
+        .as_str()
+        .expect("payload.session_id");
+    assert_eq!(
+        id, session_id,
+        "payload.id and payload.session_id must match"
+    );
+    assert_eq!(id, written.session_id);
+    assert_eq!(
+        meta["payload"]["thread_source"].as_str(),
+        Some("user"),
+        "session_meta payload should mark thread_source=user"
+    );
+}
+
 #[test]
 fn writer_codex_session_meta_is_first_line() {
     let _lock = CODEX_ENV.lock().unwrap();
@@ -596,7 +760,11 @@ fn writer_codex_reasoning_messages() {
 }
 
 #[test]
-fn writer_codex_timestamps_are_numeric() {
+fn writer_codex_top_level_timestamps_are_strings() {
+    // Regression for issue #16: current Codex readers deserialize each rollout
+    // line's top-level `timestamp` as an RFC3339 *string*. Emitting numeric
+    // timestamps (the pre-#16 behavior) made the rollout unreadable by Codex
+    // even after the session was discoverable.
     let _lock = CODEX_ENV.lock().unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
@@ -611,10 +779,11 @@ fn writer_codex_timestamps_are_numeric() {
         let ts = entry.get("timestamp");
         assert!(ts.is_some(), "Codex line {i}: missing timestamp");
         let ts = ts.unwrap();
-        assert!(
-            ts.is_f64() || ts.is_i64() || ts.is_u64(),
-            "Codex line {i}: timestamp should be numeric, got: {ts}"
-        );
+        let s = ts
+            .as_str()
+            .unwrap_or_else(|| panic!("Codex line {i}: timestamp should be a string, got: {ts}"));
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|e| panic!("Codex line {i}: timestamp not RFC3339 ({e}): {s}"));
     }
 }
 

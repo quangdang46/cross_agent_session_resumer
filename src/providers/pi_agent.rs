@@ -574,6 +574,7 @@ impl Provider for PiAgent {
             session_id: session_id.clone(),
             resume_command: self.resume_command(&session_id),
             backup_path: outcome.backup_path,
+            warnings: Vec::new(),
         })
     }
 

@@ -45,6 +45,10 @@ pub struct WrittenSession {
     pub resume_command: String,
     /// Path to the `.bak` backup, if an existing file was overwritten.
     pub backup_path: Option<PathBuf>,
+    /// Non-fatal warnings produced while writing (e.g. the target session was
+    /// written but could not be registered in the provider's resume index).
+    /// Surfaced to the user and merged into the conversion's warning list.
+    pub warnings: Vec<String>,
 }
 
 /// The core abstraction each provider implements.

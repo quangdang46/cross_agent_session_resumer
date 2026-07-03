@@ -708,6 +708,7 @@ impl Provider for Cline {
             session_id: target_task_id.clone(),
             resume_command: self.resume_command(&target_task_id),
             backup_path,
+            warnings: Vec::new(),
         })
     }
 
