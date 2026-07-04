@@ -186,6 +186,13 @@ impl Provider for ClaudeCode {
         let mut workspace: Option<PathBuf> = None;
         let mut git_branch: Option<String> = None;
         let mut version: Option<String> = None;
+        // Provider-native display names. `/rename` appends `custom-title` entries
+        // (highest priority); the harness auto-generates `ai-title` entries as a
+        // fallback; classic transcripts carry `summary` entries. Later entries
+        // supersede earlier ones, so we keep the last seen of each.
+        let mut custom_title: Option<String> = None;
+        let mut ai_title: Option<String> = None;
+        let mut summary_title: Option<String> = None;
         let mut started_at: Option<i64> = None;
         let mut ended_at: Option<i64> = None;
         let mut model_counts: std::collections::HashMap<String, usize> =
@@ -246,6 +253,28 @@ impl Provider for ClaudeCode {
 
             // Filter: only extract user/assistant conversational messages.
             let entry_type = entry.get("type").and_then(|v| v.as_str());
+
+            // Capture the provider-native session name from title-metadata
+            // entries (kept even though they are non-conversational).
+            match entry_type {
+                Some("custom-title") => {
+                    if let Some(t) = entry.get("customTitle").and_then(|v| v.as_str()) {
+                        custom_title = Some(t.to_string());
+                    }
+                }
+                Some("ai-title") => {
+                    if let Some(t) = entry.get("aiTitle").and_then(|v| v.as_str()) {
+                        ai_title = Some(t.to_string());
+                    }
+                }
+                Some("summary") => {
+                    if let Some(t) = entry.get("summary").and_then(|v| v.as_str()) {
+                        summary_title = Some(t.to_string());
+                    }
+                }
+                _ => {}
+            }
+
             let is_conversational = matches!(entry_type, Some("user") | Some("assistant"));
             if !is_conversational {
                 trace!(
@@ -344,6 +373,19 @@ impl Provider for ClaudeCode {
         }
         if let Some(ref v) = version {
             metadata.insert("claudeVersion".into(), serde_json::Value::String(v.clone()));
+        }
+        // Provider-native display name: user `/rename` wins, then the
+        // auto-generated title, then a classic summary. Blank values are ignored.
+        let native_name = custom_title
+            .or(ai_title)
+            .or(summary_title)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(name) = native_name {
+            metadata.insert(
+                crate::model::NATIVE_NAME_META_KEY.into(),
+                serde_json::Value::String(name),
+            );
         }
 
         debug!(
@@ -930,6 +972,46 @@ not json at all
 {"type":"assistant","sessionId":"s9","message":{"role":"assistant","content":"Hello"},"uuid":"u2","timestamp":"2026-01-01T00:00:01Z"}"#,
         );
         assert_eq!(session.metadata["claudeVersion"].as_str(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn reader_native_name_from_custom_title_wins() {
+        // `/rename` custom title must win over the auto-generated ai-title.
+        let session = read_cc_jsonl(
+            r#"{"type":"ai-title","aiTitle":"Auto generated title","sessionId":"s10"}
+{"type":"user","sessionId":"s10","message":{"role":"user","content":"Hi"},"uuid":"u1","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"custom-title","customTitle":"My Renamed Session","sessionId":"s10"}
+{"type":"assistant","sessionId":"s10","message":{"role":"assistant","content":"Hello"},"uuid":"u2","timestamp":"2026-01-01T00:00:01Z"}"#,
+        );
+        assert_eq!(
+            crate::model::native_name_from_metadata(&session.metadata).as_deref(),
+            Some("My Renamed Session")
+        );
+    }
+
+    #[test]
+    fn reader_native_name_falls_back_to_ai_title() {
+        let session = read_cc_jsonl(
+            r#"{"type":"ai-title","aiTitle":"Auto generated title","sessionId":"s11"}
+{"type":"user","sessionId":"s11","message":{"role":"user","content":"Hi"},"uuid":"u1","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","sessionId":"s11","message":{"role":"assistant","content":"Hello"},"uuid":"u2","timestamp":"2026-01-01T00:00:01Z"}"#,
+        );
+        assert_eq!(
+            crate::model::native_name_from_metadata(&session.metadata).as_deref(),
+            Some("Auto generated title")
+        );
+    }
+
+    #[test]
+    fn reader_native_name_absent_without_title_entries() {
+        let session = read_cc_jsonl(
+            r#"{"type":"user","sessionId":"s12","message":{"role":"user","content":"Hi"},"uuid":"u1","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","sessionId":"s12","message":{"role":"assistant","content":"Hello"},"uuid":"u2","timestamp":"2026-01-01T00:00:01Z"}"#,
+        );
+        assert!(
+            crate::model::native_name_from_metadata(&session.metadata).is_none(),
+            "sessions without title metadata must have no native name"
+        );
     }
 
     #[test]

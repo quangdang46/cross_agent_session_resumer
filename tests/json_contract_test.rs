@@ -370,6 +370,7 @@ fn assert_list_item(obj: &serde_json::Value, idx: usize) {
             "session_id",
             "provider",
             "title",
+            "native_name",
             "messages",
             "workspace",
             "started_at",
@@ -395,6 +396,7 @@ fn assert_list_item(obj: &serde_json::Value, idx: usize) {
     assert_string(&obj["session_id"], "session_id", &ctx);
     assert_string(&obj["provider"], "provider", &ctx);
     assert_string_or_null(&obj["title"], "title", &ctx);
+    assert_string_or_null(&obj["native_name"], "native_name", &ctx);
     assert_uint(&obj["messages"], "messages", &ctx);
     assert_string_or_null(&obj["workspace"], "workspace", &ctx);
     assert_number_or_null(&obj["started_at"], "started_at", &ctx);
@@ -526,9 +528,10 @@ fn contract_list_json_messages_is_nonnegative() {
 // ---------------------------------------------------------------------------
 // Contract: `info --json`
 // ---------------------------------------------------------------------------
-// Expected shape: {schema_version, session_id, provider, title, workspace,
-//                  messages, started_at, ended_at, model_name, source_path,
-//                  metadata, workspace_name, workspace_name_source}
+// Expected shape: {schema_version, session_id, provider, title, native_name,
+//                  workspace, messages, started_at, ended_at, model_name,
+//                  source_path, metadata, workspace_name, workspace_name_source}
+// (transcript_tail is present only with --peek.)
 
 fn assert_info_object(obj: &serde_json::Value) {
     let ctx = "info";
@@ -539,6 +542,7 @@ fn assert_info_object(obj: &serde_json::Value) {
             "session_id",
             "provider",
             "title",
+            "native_name",
             "workspace",
             "messages",
             "started_at",
@@ -560,6 +564,7 @@ fn assert_info_object(obj: &serde_json::Value) {
     assert_string(&obj["session_id"], "session_id", ctx);
     assert_string(&obj["provider"], "provider", ctx);
     assert_string_or_null(&obj["title"], "title", ctx);
+    assert_string_or_null(&obj["native_name"], "native_name", ctx);
     assert_string_or_null(&obj["workspace"], "workspace", ctx);
     assert_uint(&obj["messages"], "messages", ctx);
     assert_number_or_null(&obj["started_at"], "started_at", ctx);
@@ -1068,4 +1073,181 @@ fn contract_resume_source_session_id_matches_input() {
         session_id,
         "source_session_id should match the input session ID"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #17: provider-native session name (Claude Code `/rename`)
+// ---------------------------------------------------------------------------
+
+/// Install a raw Claude Code session file (`content`) under a workspace and
+/// return its session ID.
+fn install_cc_raw_session(tmp: &TempDir, session_id: &str, cwd: &str, content: &str) {
+    let project_key: String = cwd
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let projects_dir = tmp.path().join("claude/projects").join(&project_key);
+    fs::create_dir_all(&projects_dir).expect("create CC project dir");
+    let target = projects_dir.join(format!("{session_id}.jsonl"));
+    fs::write(&target, content).expect("write raw CC session");
+}
+
+const CC_RENAMED_SESSION: &str = concat!(
+    r#"{"type":"custom-title","customTitle":"My Renamed Session","sessionId":"rename-1"}"#,
+    "\n",
+    r#"{"type":"ai-title","aiTitle":"Auto Title","sessionId":"rename-1"}"#,
+    "\n",
+    r#"{"type":"user","sessionId":"rename-1","cwd":"/data/projects/named","message":{"role":"user","content":"First question"},"uuid":"u1","timestamp":"2026-01-01T00:00:00Z"}"#,
+    "\n",
+    r#"{"type":"assistant","sessionId":"rename-1","cwd":"/data/projects/named","message":{"role":"assistant","content":"An answer","model":"m1"},"uuid":"u2","timestamp":"2026-01-01T00:00:01Z"}"#,
+    "\n",
+    r#"{"type":"user","sessionId":"rename-1","cwd":"/data/projects/named","message":{"role":"user","content":"A follow up"},"uuid":"u3","timestamp":"2026-01-01T00:00:02Z"}"#,
+    "\n",
+    r#"{"type":"assistant","sessionId":"rename-1","cwd":"/data/projects/named","message":{"role":"assistant","content":"Final reply","model":"m1"},"uuid":"u4","timestamp":"2026-01-01T00:00:03Z"}"#,
+);
+
+const CC_UNNAMED_SESSION: &str = concat!(
+    r#"{"type":"user","sessionId":"plain-1","cwd":"/data/projects/plain","message":{"role":"user","content":"Just a question"},"uuid":"u1","timestamp":"2026-01-01T00:00:00Z"}"#,
+    "\n",
+    r#"{"type":"assistant","sessionId":"plain-1","cwd":"/data/projects/plain","message":{"role":"assistant","content":"Just an answer","model":"m1"},"uuid":"u2","timestamp":"2026-01-01T00:00:01Z"}"#,
+);
+
+#[test]
+fn contract_list_json_native_name_present() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "rename-1", "/data/projects/named", CC_RENAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "list", "--workspace", "/data/projects/named"])
+        .output()
+        .expect("list should run");
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let items = assert_list_envelope(&parsed);
+    assert!(!items.is_empty(), "expected the renamed session in the list");
+    // `/rename` custom title wins over the auto-generated ai-title.
+    assert_eq!(items[0]["native_name"].as_str(), Some("My Renamed Session"));
+}
+
+#[test]
+fn contract_list_json_native_name_absent_is_null() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "plain-1", "/data/projects/plain", CC_UNNAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "list", "--workspace", "/data/projects/plain"])
+        .output()
+        .expect("list should run");
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let items = assert_list_envelope(&parsed);
+    assert!(!items.is_empty(), "expected the session in the list");
+    assert!(
+        items[0]["native_name"].is_null(),
+        "a session with no native name must be null: {:?}",
+        items[0]["native_name"]
+    );
+}
+
+#[test]
+fn contract_list_human_shows_name_column() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "rename-1", "/data/projects/named", CC_RENAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["list", "--workspace", "/data/projects/named"])
+        .output()
+        .expect("list should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Name"), "table should carry a Name column");
+    assert!(
+        stdout.contains("My Renamed Session"),
+        "human list should render the native name: {stdout}"
+    );
+}
+
+#[test]
+fn contract_info_human_shows_name_line() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "rename-1", "/data/projects/named", CC_RENAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["info", "rename-1"])
+        .output()
+        .expect("info should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Name:") && stdout.contains("My Renamed Session"),
+        "info should show the native Name line: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #18: `info --peek` transcript tail
+// ---------------------------------------------------------------------------
+
+#[test]
+fn contract_info_peek_json_includes_ordered_tail() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "rename-1", "/data/projects/named", CC_RENAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "info", "rename-1", "--peek", "--peek-lines", "2"])
+        .output()
+        .expect("info --peek should run");
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+
+    let tail = parsed["transcript_tail"]
+        .as_array()
+        .expect("transcript_tail should be an array with --peek");
+    assert_eq!(tail.len(), 2, "should respect --peek-lines count");
+    // Tail = the LAST two turns, in chronological order.
+    assert_eq!(tail[0]["role"].as_str(), Some("User"));
+    assert_eq!(tail[0]["snippet"].as_str(), Some("A follow up"));
+    assert_eq!(tail[1]["role"].as_str(), Some("Assistant"));
+    assert_eq!(tail[1]["snippet"].as_str(), Some("Final reply"));
+}
+
+#[test]
+fn contract_info_without_peek_has_no_tail() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "rename-1", "/data/projects/named", CC_RENAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "info", "rename-1"])
+        .output()
+        .expect("info should run");
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert!(
+        parsed.get("transcript_tail").is_none(),
+        "transcript_tail must be omitted without --peek"
+    );
+}
+
+#[test]
+fn contract_info_human_peek_shows_tail_section() {
+    let tmp = TempDir::new().unwrap();
+    install_cc_raw_session(&tmp, "rename-1", "/data/projects/named", CC_RENAMED_SESSION);
+
+    let output = casr_cmd(&tmp)
+        .args(["info", "rename-1", "--peek", "--peek-lines", "3"])
+        .output()
+        .expect("info --peek should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Transcript Tail"),
+        "peek should append a Transcript Tail section: {stdout}"
+    );
+    assert!(stdout.contains("[Assistant]") && stdout.contains("Final reply"));
+    // Original Session Info layout is preserved above the tail.
+    assert!(stdout.contains("Session Info") && stdout.contains("Roles:"));
 }
