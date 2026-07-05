@@ -138,9 +138,9 @@ enum Command {
         #[arg(long)]
         peek: bool,
 
-        /// Number of trailing turns to show with `--peek` (implies `--peek`).
-        #[arg(long, default_value = "5")]
-        peek_lines: usize,
+        /// Number of trailing turns to show (implies `--peek`; default 5).
+        #[arg(long)]
+        peek_lines: Option<usize>,
     },
 
     /// List detected providers and their installation status.
@@ -1402,7 +1402,7 @@ fn cmd_info(
     enrich_fs: bool,
     source: Option<String>,
     peek: bool,
-    peek_lines: usize,
+    peek_lines: Option<usize>,
 ) -> anyhow::Result<()> {
     let registry = ProviderRegistry::default_registry();
     let source_hint = source.as_deref().map(casr::discovery::SourceHint::parse);
@@ -1410,9 +1410,14 @@ fn cmd_info(
     let session = resolved.provider.read_session(&resolved.path)?;
 
     let native_name = casr::model::native_name_from_metadata(&session.metadata);
+    // The tail shows when `--peek` is passed OR `--peek-lines N` is given on its
+    // own (the latter implies `--peek`, as the help states); default to 5 turns.
+    const DEFAULT_PEEK_LINES: usize = 5;
+    let show_tail = peek || peek_lines.is_some();
     // Snippet width: wider for JSON (machine-consumed), tighter for the terminal.
-    let transcript_tail = peek.then(|| {
-        casr::model::transcript_tail(&session.messages, peek_lines, PEEK_SNIPPET_MAX_CHARS)
+    let transcript_tail = show_tail.then(|| {
+        let n = peek_lines.unwrap_or(DEFAULT_PEEK_LINES);
+        casr::model::transcript_tail(&session.messages, n, PEEK_SNIPPET_MAX_CHARS)
     });
 
     if json_mode {
