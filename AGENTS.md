@@ -461,6 +461,7 @@ cross_agent_session_resumer/
 - Core aliases:
   - `cc` -> Claude Code
   - `cod` -> Codex
+  - `agy` -> Antigravity CLI (read/resume only; `agy --conversation <uuid> --model "Gemini 3.1 Pro (High)"`)
   - `gmi` -> Gemini CLI
   - `omp` -> Pi Agent (oh-my-pi CLI; sessions under `~/.omp/agent/`, alias of `pi`)
 - Provider home overrides:

@@ -198,6 +198,7 @@ impl Provider for MockProvider {
                 session_id: format!("{}-target-session", self.alias),
                 resume_command: self.resume_command(&format!("{}-target-session", self.alias)),
                 backup_path: None,
+                warnings: Vec::new(),
             }),
         }
     }
@@ -297,6 +298,7 @@ fn pipeline_convert_happy_path_writes_and_verifies() {
         session_id: "target-sid-a".to_string(),
         resume_command: "tgt --resume target-sid-a".to_string(),
         backup_path: None,
+        warnings: Vec::new(),
     });
     dst.set_read_session(written_path, session.clone());
 
@@ -411,6 +413,7 @@ fn pipeline_warns_when_target_cli_missing_but_write_succeeds() {
         session_id: "sid-target-cli-missing-out".to_string(),
         resume_command: "tgt --resume sid-target-cli-missing-out".to_string(),
         backup_path: None,
+        warnings: Vec::new(),
     });
     dst.set_read_session(
         written_path,
@@ -527,6 +530,7 @@ fn pipeline_source_hint_alias_narrows_resolution() {
         session_id: "target-id".to_string(),
         resume_command: "tgt --resume target-id".to_string(),
         backup_path: None,
+        warnings: Vec::new(),
     });
     dst.set_read_session(written_path, valid_session_with_id("from-a"));
 
@@ -570,6 +574,7 @@ fn pipeline_source_hint_path_bypasses_discovery() {
         session_id: "target-direct".to_string(),
         resume_command: "tgt --resume target-direct".to_string(),
         backup_path: None,
+        warnings: Vec::new(),
     });
     dst.set_read_session(written_path, valid_session_with_id("direct-session"));
 
@@ -638,6 +643,7 @@ fn pipeline_readback_mismatch_fails_and_removes_unverified_output() {
         session_id: "target-mismatch".to_string(),
         resume_command: "tgt --resume target-mismatch".to_string(),
         backup_path: None,
+        warnings: Vec::new(),
     });
 
     fs::write(&written_path, "unverified-output").expect("seed unverified output");
@@ -691,6 +697,7 @@ fn pipeline_readback_content_mismatch_fails_and_removes_unverified_output() {
         session_id: "target-content-mismatch".to_string(),
         resume_command: "tgt --resume target-content-mismatch".to_string(),
         backup_path: None,
+        warnings: Vec::new(),
     });
 
     fs::write(&written_path, "unverified-output").expect("seed unverified output");
@@ -742,6 +749,7 @@ fn pipeline_readback_error_restores_backup_and_returns_verify_failed() {
         session_id: "target-readback-error".to_string(),
         resume_command: "tgt --resume target-readback-error".to_string(),
         backup_path: Some(backup_path.clone()),
+        warnings: Vec::new(),
     });
     dst.set_read_error(written_path.clone(), "cannot parse written file");
 

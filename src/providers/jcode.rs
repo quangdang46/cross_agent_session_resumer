@@ -296,6 +296,7 @@ impl Provider for JCode {
             session_id: target_session_id.clone(),
             resume_command: self.resume_command(&target_session_id),
             backup_path: outcome.backup_path,
+            warnings: vec![],
         })
     }
 

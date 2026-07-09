@@ -102,8 +102,8 @@ impl ProviderRegistry {
             Box::new(crate::providers::claude_code::ClaudeCode),
             Box::new(crate::providers::codex::Codex),
             Box::new(crate::providers::gemini::Gemini),
+            Box::new(crate::providers::antigravity::Antigravity),
             Box::new(crate::providers::jcode::JCode),
-            Box::new(crate::providers::kiro::Kiro),
             Box::new(crate::providers::cursor::Cursor),
             Box::new(crate::providers::cline::Cline),
             Box::new(crate::providers::aider::Aider),
@@ -116,6 +116,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::openclaw::OpenClaw),
             Box::new(crate::providers::hermes::Hermes),
             Box::new(crate::providers::pi_agent::PiAgent),
+            Box::new(crate::providers::kiro::Kiro),
         ])
     }
 
@@ -458,6 +459,7 @@ fn canonical_provider_token(token: &str) -> &str {
         "omp" => "pi-agent",
         // Hermes.
         "hermes" => "hermes",
+        "antigravity-cli" => "antigravity",
         _ => token,
     }
 }
@@ -1073,8 +1075,8 @@ mod tests {
         found.dedup();
 
         let mut expected: Vec<String> = vec![
-            "cc", "cod", "gmi", "cur", "cln", "aid", "amp", "opc", "gpt", "cwb", "vib", "fac",
-            "ocl", "kr", "jc", "pi", "her",
+            "cc", "cod", "gmi", "agy", "cur", "cln", "aid", "amp", "opc", "gpt", "cwb", "vib",
+            "fac", "ocl", "kr", "jc", "pi", "her",
         ]
         .into_iter()
         .map(String::from)

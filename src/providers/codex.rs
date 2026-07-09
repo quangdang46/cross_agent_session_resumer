@@ -16,12 +16,13 @@
 //!
 //! Single object: `{ "session": { "id", "cwd" }, "items": [ {role, content, timestamp} ] }`
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use rusqlite::Connection;
-use std::collections::HashMap;
+use rusqlite::types::Value;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use tracing::{debug, info, trace, warn};
 use walkdir::WalkDir;
 
@@ -245,10 +246,7 @@ impl Provider for Codex {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
         let sessions_dir = Self::sessions_dir()
@@ -271,32 +269,35 @@ impl Provider for Codex {
             .to_string_lossy()
             .to_string();
 
-        // Both top-level and payload timestamps use ISO strings in native
-        // Codex sessions.
+        // Current Codex readers deserialize each rollout line's top-level
+        // `timestamp` as an RFC3339 *string* (not a numeric epoch). Emit the
+        // string form both at the envelope level and inside the payload.
         let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         lines.push(serde_json::to_string(&serde_json::json!({
             "type": "session_meta",
-            "timestamp": &now_iso,
+            "timestamp": now_iso,
             "payload": {
+                // Codex indexes threads by `id`; recent builds also read
+                // `session_id`. Emit both so discovery works across versions.
                 "id": target_session_id,
+                "session_id": target_session_id,
                 "cwd": cwd,
                 "timestamp": now_iso,
                 "originator": "casr",
                 "cli_version": env!("CARGO_PKG_VERSION"),
                 "source": "cli",
+                "thread_source": "user",
                 "model_provider": "openai",
             }
         }))?);
 
-        // 2. Messages. Codex event timestamps are ISO strings in native format.
+        // 2. Messages. Each envelope carries an RFC3339 string timestamp.
         for msg in &session.messages {
             let msg_iso = msg
                 .timestamp
-                .and_then(|ms| {
-                    chrono::DateTime::from_timestamp_millis(ms)
-                        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-                })
-                .unwrap_or_else(|| now_iso.clone());
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .unwrap_or(now)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
             for event in codex_events_for_message(msg, &msg_iso) {
                 lines.push(serde_json::to_string(&event)?);
@@ -315,23 +316,50 @@ impl Provider for Codex {
             "Codex session written"
         );
 
-        // Register the session in Codex's SQLite thread registry so that
-        // `codex resume <id>` can discover it.
-        if let Err(e) = register_in_threads_db(
+        // 3. Register the session in Codex's thread index so `codex resume <id>`
+        //    can discover it. Codex does not resume from a bare JSONL file — it
+        //    looks the id up in `~/.codex/state_*.sqlite` (`threads` table).
+        //    Failure here is non-fatal: the rollout file is already written.
+        let first_user = session
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        let title = session
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                let t = truncate_title(first_user, 100);
+                if t.is_empty() {
+                    "Resumed session (via casr)".to_string()
+                } else {
+                    t
+                }
+            });
+        let first_user_message = first_user.to_string();
+        let preview = if first_user_message.trim().is_empty() {
+            title.clone()
+        } else {
+            first_user_message.clone()
+        };
+        let warnings = Self::register_thread(
             &target_session_id,
             &outcome.target_path,
-            now.timestamp(),
             &cwd,
-            &session.title,
-        ) {
-            warn!(error = %e, "failed to register session in Codex threads DB; resume may not work");
-        }
+            &title,
+            &first_user_message,
+            &preview,
+            &now,
+        );
 
         Ok(WrittenSession {
             paths: vec![outcome.target_path],
             session_id: target_session_id.clone(),
             resume_command: self.resume_command(&target_session_id),
             backup_path: outcome.backup_path,
+            warnings,
         })
     }
 
@@ -340,106 +368,434 @@ impl Provider for Codex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Codex thread-index (state_*.sqlite) registration
+//
+// `codex resume <id>` does NOT scan rollout JSONL files. It looks the id up in
+// `~/.codex/state_*.sqlite`, table `threads`, whose `rollout_path` column
+// points back at the rollout file. Writing the JSONL alone leaves the session
+// undiscoverable ("No saved session found with ID"). We therefore register the
+// converted session by upserting a `threads` row after the rollout is written.
+//
+// Safety posture (this mutates a live Codex DB):
+//   * Introspect the actual `threads` schema; only write columns that exist.
+//   * Never modify or delete rows for any other session id — the id is a fresh
+//     UUIDv4, so the upsert only ever touches our own new row.
+//   * Refuse to write (degrade with a warning) if the schema has a required
+//     column we cannot populate, or if the state DB / `threads` table is absent.
+//   * All writes run inside a single transaction with a busy timeout.
+// ---------------------------------------------------------------------------
+
+impl Codex {
+    /// Locate the newest Codex thread-index database under `CODEX_HOME`/`~/.codex`.
+    ///
+    /// Matches `state.sqlite` and `state_<N>.sqlite`, preferring the highest
+    /// `<N>` (the current schema). Sidecar `-wal`/`-shm` files are ignored.
+    fn latest_state_db() -> Option<PathBuf> {
+        let home = Self::home_dir()?;
+        let mut best: Option<(i64, PathBuf)> = None;
+        for entry in std::fs::read_dir(&home).ok()?.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(version) = state_db_version(name) {
+                let replace = best.as_ref().is_none_or(|(v, _)| version > *v);
+                if replace {
+                    best = Some((version, path));
+                }
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Register the converted session in Codex's thread index.
+    ///
+    /// Returns any non-fatal warnings to surface to the user (empty on success).
+    /// A rollout file that could not be registered is still on disk, so the
+    /// warning includes that path as a fallback.
+    fn register_thread(
+        session_id: &str,
+        rollout_path: &Path,
+        cwd: &str,
+        title: &str,
+        first_user_message: &str,
+        preview: &str,
+        now: &chrono::DateTime<chrono::Utc>,
+    ) -> Vec<String> {
+        let Some(db_path) = Self::latest_state_db() else {
+            debug!("no Codex state_*.sqlite found; skipping thread registration");
+            return vec![format!(
+                "Codex thread index (~/.codex/state_*.sqlite) not found, so \
+                 `codex resume {session_id}` may not discover this session. \
+                 The rollout file was written to {}.",
+                rollout_path.display()
+            )];
+        };
+
+        match register_thread_in_db(
+            &db_path,
+            session_id,
+            rollout_path,
+            cwd,
+            title,
+            first_user_message,
+            preview,
+            now,
+        ) {
+            Ok(()) => {
+                debug!(db = %db_path.display(), session_id, "registered Codex thread");
+                Vec::new()
+            }
+            Err(e) => {
+                warn!(db = %db_path.display(), error = %e, "failed to register Codex thread");
+                vec![format!(
+                    "Could not register the session in the Codex thread index \
+                     ({db}): {e}. `codex resume {session_id}` may report \
+                     \"No saved session found\"; the rollout file is at {path}.",
+                    db = db_path.display(),
+                    path = rollout_path.display(),
+                )]
+            }
+        }
+    }
+}
+
+/// Parse the schema version from a Codex state DB filename.
+///
+/// `state.sqlite` → 0, `state_5.sqlite` → 5. Returns `None` for anything else
+/// (including the `-wal`/`-shm` sidecars).
+fn state_db_version(name: &str) -> Option<i64> {
+    let stem = name.strip_suffix(".sqlite")?;
+    if stem == "state" {
+        return Some(0);
+    }
+    stem.strip_prefix("state_")?.parse::<i64>().ok()
+}
+
+/// Introspected metadata for one `threads` column.
+struct ColInfo {
+    notnull: bool,
+    has_default: bool,
+}
+
+/// Read `PRAGMA table_info(threads)` into a name → [`ColInfo`] map.
+/// Returns an empty map if the table does not exist.
+fn introspect_threads(conn: &Connection) -> anyhow::Result<HashMap<String, ColInfo>> {
+    let mut map = HashMap::new();
+    let Ok(mut stmt) = conn.prepare("PRAGMA table_info(threads)") else {
+        return Ok(map);
+    };
+    let rows = stmt.query_map([], |row| {
+        let name: String = row.get(1)?;
+        let notnull: i64 = row.get(3)?;
+        let dflt: Option<String> = row.get(4)?;
+        Ok((
+            name,
+            ColInfo {
+                notnull: notnull != 0,
+                has_default: dflt.is_some(),
+            },
+        ))
+    })?;
+    for row in rows {
+        let (name, info) = row?;
+        map.insert(name, info);
+    }
+    Ok(map)
+}
+
+/// Environment-shaped column defaults copied from an existing (Codex-authored)
+/// `threads` row, so values like `sandbox_policy` are guaranteed to be ones
+/// Codex itself wrote and can parse back. Falls back to conservative literals.
+struct EnvTemplate {
+    source: String,
+    model_provider: String,
+    sandbox_policy: String,
+    approval_mode: String,
+    memory_mode: String,
+    cli_version: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+fn read_env_template(conn: &Connection, cols: &HashMap<String, ColInfo>) -> EnvTemplate {
+    let mut t = EnvTemplate {
+        source: "cli".to_string(),
+        model_provider: "openai".to_string(),
+        sandbox_policy: r#"{"type":"read-only"}"#.to_string(),
+        approval_mode: "on-request".to_string(),
+        memory_mode: "enabled".to_string(),
+        cli_version: None,
+        model: None,
+        reasoning_effort: None,
+    };
+
+    // Prefer real values from the most recent normal user session.
+    let wanted = [
+        "source",
+        "model_provider",
+        "sandbox_policy",
+        "approval_mode",
+        "memory_mode",
+        "cli_version",
+        "model",
+        "reasoning_effort",
+    ];
+    let sel: Vec<&str> = wanted
+        .iter()
+        .copied()
+        .filter(|c| cols.contains_key(*c))
+        .collect();
+    if sel.is_empty() {
+        return t;
+    }
+    let where_clause = if cols.contains_key("thread_source") {
+        "WHERE thread_source = 'user' OR thread_source IS NULL"
+    } else {
+        ""
+    };
+    let order = if cols.contains_key("updated_at") {
+        "ORDER BY updated_at DESC, rowid DESC"
+    } else {
+        "ORDER BY rowid DESC"
+    };
+    let sql = format!(
+        "SELECT {} FROM threads {} {} LIMIT 1",
+        sel.join(", "),
+        where_clause,
+        order
+    );
+
+    let got = conn.query_row(&sql, [], |row| {
+        let mut vals: Vec<Option<String>> = Vec::with_capacity(sel.len());
+        for i in 0..sel.len() {
+            vals.push(row.get::<_, Option<String>>(i)?);
+        }
+        Ok(vals)
+    });
+
+    if let Ok(vals) = got {
+        for (name, val) in sel.iter().zip(vals) {
+            let Some(v) = val else { continue };
+            if v.is_empty() {
+                continue;
+            }
+            match *name {
+                "source" => t.source = v,
+                "model_provider" => t.model_provider = v,
+                "sandbox_policy" => t.sandbox_policy = v,
+                "approval_mode" => t.approval_mode = v,
+                "memory_mode" => t.memory_mode = v,
+                "cli_version" => t.cli_version = Some(v),
+                "model" => t.model = Some(v),
+                "reasoning_effort" => t.reasoning_effort = Some(v),
+                _ => {}
+            }
+        }
+    }
+    t
+}
+
+/// Upsert one `threads` row for the converted session. See module comment above
+/// for the safety posture. Only ever touches the row keyed by `session_id`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "maps the several thread columns Codex needs; a struct would not add clarity"
+)]
+fn register_thread_in_db(
+    db_path: &Path,
+    session_id: &str,
+    rollout_path: &Path,
+    cwd: &str,
+    title: &str,
+    first_user_message: &str,
+    preview: &str,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let mut conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open Codex state DB {}", db_path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+    let cols = introspect_threads(&conn)?;
+    if cols.is_empty() {
+        anyhow::bail!("`threads` table is absent (unrecognized Codex schema)");
+    }
+
+    let env = read_env_template(&conn, &cols);
+
+    // Absolute rollout path (Codex resolves the rollout by this exact value).
+    let abs = if rollout_path.is_absolute() {
+        rollout_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(rollout_path))
+            .unwrap_or_else(|_| rollout_path.to_path_buf())
+    };
+    let abs_str = abs.to_string_lossy().to_string();
+    let created = now.timestamp();
+    let created_ms = now.timestamp_millis();
+
+    // Desired (column, value) pairs. Filtered to columns that actually exist so
+    // the write is resilient across Codex schema versions.
+    let mut desired: Vec<(&str, Value)> = vec![
+        ("id", Value::Text(session_id.to_string())),
+        ("rollout_path", Value::Text(abs_str.clone())),
+        ("created_at", Value::Integer(created)),
+        ("updated_at", Value::Integer(created)),
+        ("created_at_ms", Value::Integer(created_ms)),
+        ("updated_at_ms", Value::Integer(created_ms)),
+        ("recency_at", Value::Integer(created)),
+        ("recency_at_ms", Value::Integer(created_ms)),
+        ("source", Value::Text(env.source)),
+        ("model_provider", Value::Text(env.model_provider)),
+        ("cwd", Value::Text(cwd.to_string())),
+        ("title", Value::Text(title.to_string())),
+        ("sandbox_policy", Value::Text(env.sandbox_policy)),
+        ("approval_mode", Value::Text(env.approval_mode)),
+        ("memory_mode", Value::Text(env.memory_mode)),
+        (
+            "first_user_message",
+            Value::Text(first_user_message.to_string()),
+        ),
+        ("preview", Value::Text(preview.to_string())),
+        ("thread_source", Value::Text("user".to_string())),
+        ("has_user_event", Value::Integer(1)),
+        (
+            "cli_version",
+            Value::Text(env.cli_version.unwrap_or_default()),
+        ),
+    ];
+    // Optional Codex-native model metadata, only when we have a real value.
+    if let Some(m) = env.model {
+        desired.push(("model", Value::Text(m)));
+    }
+    if let Some(r) = env.reasoning_effort {
+        desired.push(("reasoning_effort", Value::Text(r)));
+    }
+
+    let present: Vec<(&str, Value)> = desired
+        .into_iter()
+        .filter(|(c, _)| cols.contains_key(*c))
+        .collect();
+    let provided: std::collections::HashSet<&str> = present.iter().map(|(c, _)| *c).collect();
+
+    // Defensive: refuse to insert if the schema has a NOT NULL column with no
+    // default that we do not populate (an unknown/incompatible schema version).
+    let mut missing: Vec<&str> = cols
+        .iter()
+        .filter(|(name, info)| {
+            info.notnull && !info.has_default && !provided.contains(name.as_str())
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        missing.sort_unstable();
+        anyhow::bail!(
+            "Codex `threads` schema requires column(s) casr cannot populate: {}",
+            missing.join(", ")
+        );
+    }
+
+    let col_names: Vec<&str> = present.iter().map(|(c, _)| *c).collect();
+    let placeholders: Vec<String> = (1..=col_names.len()).map(|i| format!("?{i}")).collect();
+    // Preserve original creation columns on conflict; refresh the rest.
+    let update_set: Vec<String> = col_names
+        .iter()
+        .filter(|c| !matches!(**c, "id" | "created_at" | "created_at_ms"))
+        .map(|c| format!("{c} = excluded.{c}"))
+        .collect();
+    let conflict = if update_set.is_empty() {
+        "ON CONFLICT(id) DO NOTHING".to_string()
+    } else {
+        format!("ON CONFLICT(id) DO UPDATE SET {}", update_set.join(", "))
+    };
+    let sql = format!(
+        "INSERT INTO threads ({}) VALUES ({}) {}",
+        col_names.join(", "),
+        placeholders.join(", "),
+        conflict,
+    );
+    let params: Vec<Value> = present.into_iter().map(|(_, v)| v).collect();
+
+    let tx = conn.transaction().context("begin transaction")?;
+    tx.execute(&sql, rusqlite::params_from_iter(params.iter()))
+        .context("insert thread row")?;
+    tx.commit().context("commit thread row")?;
+
+    // Verify the row landed and points at our rollout file.
+    let ok = conn
+        .query_row(
+            "SELECT 1 FROM threads WHERE id = ?1 AND rollout_path = ?2",
+            rusqlite::params![session_id, abs_str],
+            |_| Ok(true),
+        )
+        .optional()
+        .context("verify thread row")?
+        .unwrap_or(false);
+    if !ok {
+        anyhow::bail!("post-write verification failed: thread row not found for {session_id}");
+    }
+    Ok(())
+}
+
 /// Build the Codex JSONL event(s) for one canonical message.
 ///
-/// `msg_ts` is the event timestamp as an ISO-8601 string, matching the
-/// string timestamp format Codex uses natively in rollout files.
+/// `msg_ts` is the event timestamp as an RFC3339 string, matching the
+/// top-level `timestamp` format current Codex readers expect.
 fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_json::Value> {
-    let mut events: Vec<serde_json::Value> = Vec::new();
-
-    // Tool calls and tool results must be serialised as their own top-level
-    // `response_item` envelopes with `payload.type` = `function_call` /
-    // `function_call_output`. Bundling them as `tool_use` / `tool_result`
-    // content blocks inside a `message` envelope is the OpenAI Responses API
-    // shape, not Codex's native rollout shape — the Codex server
-    // (and providers in front of it) then fails the resume with
-    // `invalid params, tool result's tool id() not found` because there is
-    // no `function_call` to link the `function_call_output` back to.
-
-    for tc in &msg.tool_calls {
-        let call_id = tc.id.clone().unwrap_or_default();
-        let arguments = tc
-            .arguments
-            .as_str()
-            .map(String::from)
-            .unwrap_or_else(|| tc.arguments.to_string());
-        events.push(serde_json::json!({
-            "type": "response_item",
-            "timestamp": msg_ts,
-            "payload": {
-                "type": "function_call",
-                "name": tc.name,
-                "arguments": arguments,
-                "call_id": call_id,
-            }
-        }));
-    }
-
-    for tr in &msg.tool_results {
-        let call_id = tr.call_id.clone().unwrap_or_default();
-        let output = if tr.is_error {
-            // Codex's `function_call_output` does not have a dedicated error
-            // flag on the wire; surface the error in the output string so the
-            // assistant still has it on the next turn.
-            format!("[tool error] {}", tr.content)
-        } else {
-            tr.content.clone()
-        };
-        events.push(serde_json::json!({
-            "type": "response_item",
-            "timestamp": msg_ts,
-            "payload": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output,
-            }
-        }));
-    }
-
-    // Now decide how to emit the message envelope itself.
-    let has_tool_payload = !msg.tool_calls.is_empty() || !msg.tool_results.is_empty();
+    // User messages that carry tool payloads must be serialized as response_item
+    // envelopes; event_msg/user_message cannot represent tool_use/tool_result blocks.
+    let user_needs_response_item = msg.role == MessageRole::User
+        && (!msg.tool_calls.is_empty() || !msg.tool_results.is_empty());
 
     match msg.role {
-        MessageRole::User if !has_tool_payload => {
-            events.push(serde_json::json!({
-                "type": "event_msg",
-                "timestamp": msg_ts,
-                "payload": {
-                    "type": "user_message",
-                    "message": msg.content,
-                }
-            }));
-        }
+        MessageRole::User if !user_needs_response_item => vec![serde_json::json!({
+            "type": "event_msg",
+            "timestamp": msg_ts,
+            "payload": {
+                "type": "user_message",
+                "message": msg.content,
+            }
+        })],
+        MessageRole::User => vec![serde_json::json!({
+            "type": "response_item",
+            "timestamp": msg_ts,
+            "payload": {
+                "type": "message",
+                "role": codex_role_string(&msg.role),
+                "content": codex_response_content(msg),
+            }
+        })],
         MessageRole::Assistant if msg.author.as_deref() == Some("reasoning") => {
-            events.push(serde_json::json!({
+            vec![serde_json::json!({
                 "type": "event_msg",
                 "timestamp": msg_ts,
                 "payload": {
                     "type": "agent_reasoning",
                     "text": msg.content,
                 }
-            }));
+            })]
         }
         MessageRole::Assistant
         | MessageRole::Tool
         | MessageRole::System
-        | MessageRole::User
         | MessageRole::Other(_) => {
-            // For tool-only messages, skip the text envelope if there is no
-            // content beyond the tool payload we already emitted.
-            if msg.content.trim().is_empty() && has_tool_payload {
-                // already emitted function_call / function_call_output
-            } else {
-                events.push(serde_json::json!({
-                    "type": "response_item",
-                    "timestamp": msg_ts,
-                    "payload": {
-                        "type": "message",
-                        "role": codex_role_string(&msg.role),
-                        "content": codex_response_text_only(msg),
-                    }
-                }));
-            }
+            let mut events = vec![serde_json::json!({
+                "type": "response_item",
+                "timestamp": msg_ts,
+                "payload": {
+                    "type": "message",
+                    "role": codex_role_string(&msg.role),
+                    "content": codex_response_content(msg),
+                }
+            })];
 
             if let Some(info) = codex_token_count_info(&msg.extra) {
                 events.push(serde_json::json!({
@@ -451,10 +807,10 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_j
                     }
                 }));
             }
+
+            events
         }
     }
-
-    events
 }
 
 fn codex_role_string(role: &MessageRole) -> String {
@@ -467,31 +823,50 @@ fn codex_role_string(role: &MessageRole) -> String {
     }
 }
 
-/// Build a `message` envelope content array that carries only text. Tool
-/// calls and tool results must NOT appear here — they are emitted as
-/// separate top-level `function_call` / `function_call_output` response
-/// items by `codex_events_for_message`. Bundling them into a `message`
-/// envelope uses the OpenAI Responses API shape, not Codex's native
-/// rollout shape.
-fn codex_response_text_only(msg: &CanonicalMessage) -> serde_json::Value {
+fn codex_response_content(msg: &CanonicalMessage) -> serde_json::Value {
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+
+    // Codex expects "output_text" for assistant-generated content blocks,
+    // "input_text" for user-supplied content blocks.
     let text_type = if msg.role == MessageRole::Assistant {
         "output_text"
     } else {
         "input_text"
     };
-    let mut blocks: Vec<serde_json::Value> = Vec::new();
+
     if !msg.content.is_empty() {
         blocks.push(serde_json::json!({
             "type": text_type,
             "text": msg.content,
         }));
     }
+
+    for tc in &msg.tool_calls {
+        blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": tc.id.as_deref().unwrap_or(""),
+            "name": tc.name,
+            "input": tc.arguments,
+        }));
+    }
+
+    for tr in &msg.tool_results {
+        blocks.push(serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tr.call_id.as_deref().unwrap_or(""),
+            "content": tr.content,
+            "is_error": tr.is_error,
+        }));
+    }
+
+    // Avoid empty response payloads in provider-native output.
     if blocks.is_empty() {
         blocks.push(serde_json::json!({
             "type": text_type,
             "text": msg.content,
         }));
     }
+
     serde_json::Value::Array(blocks)
 }
 
@@ -570,8 +945,6 @@ impl Codex {
 
         let mut session_id: Option<String> = None;
         let mut workspace: Option<PathBuf> = None;
-        let mut model_provider: Option<String> = None;
-        let mut turn_context_models: HashMap<String, usize> = HashMap::new();
         let mut started_at: Option<i64> = None;
         let mut ended_at: Option<i64> = None;
         let mut messages: Vec<CanonicalMessage> = Vec::new();
@@ -619,12 +992,6 @@ impl Codex {
                         }
                         if workspace.is_none() {
                             workspace = p.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
-                        }
-                        if model_provider.is_none() {
-                            model_provider = p
-                                .get("model_provider")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
                         }
                     }
                 }
@@ -760,19 +1127,6 @@ impl Codex {
                         }
                     }
                 }
-                "turn_context" => {
-                    if let Some(p) = payload
-                        && let Some(model) = p.get("model").and_then(|v| v.as_str())
-                        && !model.is_empty()
-                    {
-                        // Strip provider prefix (e.g., "ocg/deepseek-v4-flash" → "deepseek-v4-flash")
-                        // so the model name matches opencode's built-in model registry.
-                        let clean_model = model.split('/').next_back().unwrap_or(model);
-                        *turn_context_models
-                            .entry(clean_model.to_string())
-                            .or_insert(0) += 1;
-                    }
-                }
                 "compacted" => {
                     // A compaction event replaces all accumulated history with a
                     // condensed `replacement_history` snapshot — the source
@@ -857,26 +1211,8 @@ impl Codex {
         }
 
         reindex_messages(&mut messages);
-
-        // Prefer the most frequent model name from turn_context events over model_provider.
-        // The provider prefix (e.g., "ocg/") is stripped during extraction so the bare model
-        // name matches opencode's built-in model registry.
-        // model_provider is the router/proxy name (e.g. "9router").
-        let resolved_model = turn_context_models
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(name, _)| name)
-            .or(model_provider);
-
         self.build_session(
-            path,
-            session_id,
-            workspace,
-            resolved_model,
-            started_at,
-            ended_at,
-            messages,
-            skipped,
+            path, session_id, workspace, started_at, ended_at, messages, skipped,
         )
     }
 
@@ -937,7 +1273,7 @@ impl Codex {
 
         reindex_messages(&mut messages);
         self.build_session(
-            path, session_id, workspace, None, started_at, ended_at, messages, 0,
+            path, session_id, workspace, started_at, ended_at, messages, 0,
         )
     }
 
@@ -951,7 +1287,6 @@ impl Codex {
         path: &Path,
         session_id: Option<String>,
         workspace: Option<PathBuf>,
-        model_provider: Option<String>,
         started_at: Option<i64>,
         ended_at: Option<i64>,
         messages: Vec<CanonicalMessage>,
@@ -998,7 +1333,7 @@ impl Codex {
             messages,
             metadata: serde_json::Value::Object(metadata),
             source_path: path.to_path_buf(),
-            model_name: model_provider,
+            model_name: None,
         })
     }
 }
@@ -1216,121 +1551,6 @@ fn session_meta_id(path: &Path) -> Option<String> {
     None
 }
 
-/// Register a session in Codex's SQLite `threads` table so that
-/// `codex resume <id>` can discover it.
-///
-/// Codex v0.137+ uses `~/.codex/state_5.sqlite` as its session registry.
-/// The `threads` table maps session IDs to rollout file paths. Without
-/// this row, `codex resume` returns "No saved session found".
-const THREADS_TABLE_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS threads (
-    id TEXT PRIMARY KEY,
-    rollout_path TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    source TEXT NOT NULL,
-    model_provider TEXT NOT NULL,
-    cwd TEXT NOT NULL,
-    title TEXT NOT NULL,
-    sandbox_policy TEXT NOT NULL,
-    approval_mode TEXT NOT NULL,
-    tokens_used INTEGER NOT NULL DEFAULT 0,
-    has_user_event INTEGER NOT NULL DEFAULT 0,
-    archived INTEGER NOT NULL DEFAULT 0,
-    archived_at INTEGER,
-    git_sha TEXT,
-    git_branch TEXT,
-    git_origin_url TEXT,
-    cli_version TEXT NOT NULL DEFAULT '',
-    first_user_message TEXT NOT NULL DEFAULT '',
-    agent_nickname TEXT,
-    agent_role TEXT,
-    memory_mode TEXT NOT NULL DEFAULT 'enabled',
-    model TEXT,
-    reasoning_effort TEXT,
-    agent_path TEXT,
-    created_at_ms INTEGER,
-    updated_at_ms INTEGER,
-    thread_source TEXT,
-    preview TEXT NOT NULL DEFAULT ''
-)
-"#;
-
-/// Register a session in Codex's SQLite `threads` table so that
-/// `codex resume <id>` can discover it.
-///
-/// Codex v0.137+ uses `~/.codex/state_5.sqlite` as its session registry.
-/// The `threads` table maps session IDs to rollout file paths. Without
-/// this row, `codex resume` returns "No saved session found".
-///
-/// If the DB or table doesn't exist yet (e.g. Codex hasn't been run yet),
-/// we create them with the schema Codex expects so registration succeeds.
-fn register_in_threads_db(
-    session_id: &str,
-    rollout_path: &Path,
-    created_at: i64,
-    cwd: &str,
-    title: &Option<String>,
-) -> anyhow::Result<()> {
-    let db_path = Codex::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine Codex home directory"))?
-        .join("state_5.sqlite");
-
-    let db_exists = db_path.exists();
-
-    // Create the DB and threads table if they don't exist, so registration
-    // works even if Codex hasn't been run yet.
-    if !db_exists {
-        debug!(path = %db_path.display(), "creating threads DB and table");
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        let conn = Connection::open(&db_path)
-            .with_context(|| format!("failed to create {}", db_path.display()))?;
-        conn.execute_batch(THREADS_TABLE_SCHEMA)
-            .with_context(|| format!("failed to create threads table in {}", db_path.display()))?;
-    }
-
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open {}", db_path.display()))?;
-
-    let title_str = title.as_deref().unwrap_or("Resumed session");
-
-    conn.execute(
-        "INSERT OR IGNORE INTO threads (
-            id, rollout_path, created_at, updated_at,
-            source, model_provider, cwd, title,
-            sandbox_policy, approval_mode,
-            tokens_used, has_user_event, archived,
-            cli_version, first_user_message, memory_mode, thread_source
-        ) VALUES (
-            ?1, ?2, ?3, ?4,
-            ?5, ?6, ?7, ?8,
-            ?9, ?10,
-            0, 0, 0,
-            ?11, '', 'enabled', 'casr'
-        )",
-        rusqlite::params![
-            session_id,
-            rollout_path.to_string_lossy(),
-            created_at,
-            created_at,
-            "cli",
-            "openai",
-            cwd,
-            title_str,
-            r#"{"type":"managed","file_system":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"},{"path":{"type":"special","value":{"kind":"slash_tmp"}},"access":"write"},{"path":{"type":"special","value":{"kind":"tmpdir"}},"access":"write"}]},"network":"restricted"}"#,
-            "on-failure",
-            env!("CARGO_PKG_VERSION"),
-        ],
-    )
-    .with_context(|| format!("failed to insert thread {session_id}"))?;
-
-    debug!(session_id, path = %db_path.display(), "registered session in Codex threads DB");
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Codex, codex_events_for_message, rollout_path};
@@ -1388,38 +1608,21 @@ mod tests {
             }),
         };
 
-        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
-        // Four events: function_call, function_call_output, text message
-        // envelope (carries the assistant prose), token_count.
-        assert_eq!(events.len(), 4);
-
+        let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0]["type"], "response_item");
-        assert_eq!(events[0]["payload"]["type"], "function_call");
-        assert_eq!(events[0]["payload"]["call_id"], "call-1");
-        assert_eq!(events[0]["payload"]["name"], "apply_patch");
-        assert_eq!(
-            events[0]["payload"]["arguments"],
-            json!({"path":"src/providers/codex.rs"}).to_string()
-        );
-
-        assert_eq!(events[1]["type"], "response_item");
-        assert_eq!(events[1]["payload"]["type"], "function_call_output");
-        assert_eq!(events[1]["payload"]["call_id"], "call-1");
-        assert_eq!(events[1]["payload"]["output"], "ok");
-
-        assert_eq!(events[2]["type"], "response_item");
-        assert_eq!(events[2]["payload"]["type"], "message");
-        assert_eq!(events[2]["payload"]["role"], "assistant");
-        let text_blocks = events[2]["payload"]["content"]
+        assert_eq!(events[0]["payload"]["type"], "message");
+        let content_blocks = events[0]["payload"]["content"]
             .as_array()
-            .expect("assistant text envelope content should be array");
-        assert!(text_blocks.iter().any(|b| b["type"] == "output_text"));
+            .expect("response_item content should be array");
+        assert!(content_blocks.iter().any(|b| b["type"] == "tool_use"));
+        assert!(content_blocks.iter().any(|b| b["type"] == "tool_result"));
 
-        assert_eq!(events[3]["type"], "event_msg");
-        assert_eq!(events[3]["payload"]["type"], "token_count");
-        assert_eq!(events[3]["payload"]["info"]["input_tokens"], 11);
-        assert_eq!(events[3]["payload"]["info"]["output_tokens"], 22);
-        assert_eq!(events[3]["payload"]["info"]["total_tokens"], 33);
+        assert_eq!(events[1]["type"], "event_msg");
+        assert_eq!(events[1]["payload"]["type"], "token_count");
+        assert_eq!(events[1]["payload"]["info"]["input_tokens"], 11);
+        assert_eq!(events[1]["payload"]["info"]["output_tokens"], 22);
+        assert_eq!(events[1]["payload"]["info"]["total_tokens"], 33);
     }
 
     #[test]
@@ -1443,19 +1646,16 @@ mod tests {
             extra: json!({}),
         };
 
-        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
-        // Two events: function_call, function_call_output (no text envelope
-        // because the message has empty content but a tool payload).
-        assert_eq!(events.len(), 2);
+        let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "response_item");
-        assert_eq!(events[0]["payload"]["type"], "function_call");
-        assert_eq!(events[0]["payload"]["call_id"], "call-7");
-        assert_eq!(events[0]["payload"]["name"], "Read");
-
-        assert_eq!(events[1]["type"], "response_item");
-        assert_eq!(events[1]["payload"]["type"], "function_call_output");
-        assert_eq!(events[1]["payload"]["call_id"], "call-7");
-        assert_eq!(events[1]["payload"]["output"], "fn main() {}");
+        assert_eq!(events[0]["payload"]["type"], "message");
+        assert_eq!(events[0]["payload"]["role"], "user");
+        let blocks = events[0]["payload"]["content"]
+            .as_array()
+            .expect("response_item content should be array");
+        assert!(blocks.iter().any(|b| b["type"] == "tool_use"));
+        assert!(blocks.iter().any(|b| b["type"] == "tool_result"));
     }
 
     #[test]
@@ -1763,7 +1963,7 @@ not json
             tool_results: vec![],
             extra: json!({}),
         };
-        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
+        let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "event_msg");
         assert_eq!(events[0]["payload"]["type"], "user_message");
@@ -1782,7 +1982,7 @@ not json
             tool_results: vec![],
             extra: json!({}),
         };
-        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
+        let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "event_msg");
         assert_eq!(events[0]["payload"]["type"], "agent_reasoning");
@@ -1813,7 +2013,7 @@ not json
             tool_results: vec![],
             extra: json!(null),
         };
-        let events = codex_events_for_message(&msg, "2026-06-06T04:38:39.932Z");
+        let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
         assert_eq!(
             events.len(),
             1,

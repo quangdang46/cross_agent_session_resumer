@@ -677,6 +677,7 @@ impl Provider for Cursor {
             session_id: target_composer_id.clone(),
             resume_command: self.resume_command(&target_composer_id),
             backup_path: None,
+            warnings: Vec::new(),
         })
     }
 

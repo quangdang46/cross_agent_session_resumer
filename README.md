@@ -86,6 +86,7 @@ claude --resume <new-session-id>
 |---|---|---|---|---|
 | Claude Code | `cc` | Yes | Yes | `claude --resume <session-id>` |
 | Codex | `cod` | Yes | Yes | `codex resume <session-id>` |
+| Antigravity | `agy` | Yes | No | `agy --conversation <uuid> --model "Gemini 3.1 Pro (High)"` |
 | Gemini CLI | `gmi` | Yes | Yes | `gemini --resume <session-id>` |
 | Cursor | `cur` | Yes | Yes | `cursor .` |
 | Cline | `cln` | Yes | Yes | `code .` |
@@ -98,6 +99,7 @@ claude --resume <new-session-id>
 | Factory | `fac` | Yes | Yes | `factory --resume <session-id>` |
 | OpenClaw | `ocl` | Yes | Yes | `openclaw --resume <session-id>` |
 | Pi-Agent | `pi`, `omp` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
+| Kiro CLI | `kr` | Yes | Yes | `kiro-cli --resume-id <session-id>` |
 
 Notes:
 - Initial core focus is Claude Code, Codex, and Gemini CLI.
@@ -388,7 +390,7 @@ Common examples:
 `casr` supports two equivalent resume styles:
 
 - Canonical subcommand form: `casr <target> resume <session-id>`
-- Shorthand form: `casr -cc <session-id>`, `casr -cod <session-id>`, `casr -gmi <session-id>`
+- Shorthand form: `casr -cc <session-id>`, `casr -cod <session-id>`, `casr -agy <session-id>`, `casr -gmi <session-id>`
 
 Shorthand flags are rewritten internally before clap parsing, so logging, JSON output, and error handling stay identical across both forms.
 

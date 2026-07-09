@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use casr::model::{CanonicalMessage, CanonicalSession, MessageRole, ToolCall};
 use casr::providers::amp::Amp;
 use casr::providers::chatgpt::ChatGpt;
-use casr::providers::claude_code::{ClaudeCode, project_dir_key};
+use casr::providers::claude_code::ClaudeCode;
 use casr::providers::clawdbot::ClawdBot;
 use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
@@ -148,7 +148,13 @@ fn writer_cc_roundtrip() {
 
     let session = simple_session();
     let written = ClaudeCode
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("CC write_session should succeed");
 
     assert_eq!(written.paths.len(), 1, "CC should produce exactly one file");
@@ -179,14 +185,9 @@ fn writer_cc_roundtrip() {
             "CC roundtrip msg {i}: content mismatch"
         );
     }
-    // CC write_session uses CWD (not source session workspace) to derive the
-    // project directory key, so `claude --resume` can find the session from
-    // the same CWD. Therefore readback.workspace will be the CWD, not the
-    // source session's workspace path.
     assert_eq!(
-        readback.workspace,
-        std::env::current_dir().ok(),
-        "CC roundtrip: workspace should match CWD"
+        readback.workspace, session.workspace,
+        "CC roundtrip: workspace"
     );
     assert!(
         readback.model_name.is_some(),
@@ -201,7 +202,13 @@ fn writer_cc_output_valid_jsonl() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -221,7 +228,13 @@ fn writer_cc_entries_have_required_fields() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -256,7 +269,13 @@ fn writer_cc_parent_uuid_chain() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -290,16 +309,22 @@ fn writer_cc_workspace_directory_placement() {
 
     let session = simple_session(); // workspace: /data/projects/myapp
     let written = ClaudeCode
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let path = &written.paths[0];
-    // File should be under <CLAUDE_HOME>/projects/<cwd-dir-key>/<uuid>.jsonl
-    let cwd_key = project_dir_key(&std::env::current_dir().unwrap());
+    // File should be under <CLAUDE_HOME>/projects/-data-projects-myapp/<uuid>.jsonl
+    let expected_dir_key = "-data-projects-myapp";
     let parent = path.parent().unwrap();
     assert!(
-        parent.ends_with(&cwd_key),
-        "CC file should be under project dir key '{cwd_key}', got: {}",
+        parent.ends_with(expected_dir_key),
+        "CC file should be under project dir key '{expected_dir_key}', got: {}",
         parent.display()
     );
     assert!(
@@ -315,7 +340,13 @@ fn writer_cc_timestamps_are_rfc3339() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -340,7 +371,13 @@ fn writer_cc_tool_calls_in_assistant_content() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&tool_call_session(), &WriteOptions::default())
+        .write_session(
+            &tool_call_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -377,7 +414,13 @@ fn writer_cc_model_name_on_assistant_entries() {
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
 
     let written = ClaudeCode
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -404,7 +447,13 @@ fn writer_codex_roundtrip() {
 
     let session = simple_session();
     let written = Codex
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Codex write_session should succeed");
 
     assert_eq!(
@@ -452,7 +501,13 @@ fn writer_codex_output_valid_jsonl() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -470,6 +525,188 @@ fn writer_codex_output_valid_jsonl() {
     }
 }
 
+/// The real Codex 0.142.5 `threads` schema. Used as a fixture so the
+/// registration test exercises the exact NOT NULL / default constraints and
+/// column set casr must satisfy on a live database. Keep in sync with
+/// `sqlite3 ~/.codex/state_5.sqlite '.schema threads'`.
+const CODEX_THREADS_SCHEMA: &str = r#"
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT,
+    cli_version TEXT NOT NULL DEFAULT '',
+    first_user_message TEXT NOT NULL DEFAULT '',
+    agent_nickname TEXT,
+    agent_role TEXT,
+    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+    model TEXT,
+    reasoning_effort TEXT,
+    agent_path TEXT,
+    created_at_ms INTEGER,
+    updated_at_ms INTEGER,
+    thread_source TEXT,
+    preview TEXT NOT NULL DEFAULT '',
+    recency_at INTEGER NOT NULL DEFAULT 0,
+    recency_at_ms INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
+/// Regression for issue #16: `codex resume <id>` looks the session up in
+/// `~/.codex/state_*.sqlite` (`threads` table), not by scanning JSONL. After a
+/// CC→Codex conversion, casr must register a `threads` row for the converted
+/// session pointing at the rollout file.
+#[test]
+fn writer_codex_registers_thread_in_state_db() {
+    let _lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CODEX_HOME", tmp.path());
+
+    // Seed a state_5.sqlite with the real threads schema.
+    let db_path = tmp.path().join("state_5.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(CODEX_THREADS_SCHEMA).unwrap();
+    }
+
+    let session = simple_session();
+    let written = Codex
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
+        .expect("Codex write_session should succeed");
+
+    assert!(
+        written.warnings.is_empty(),
+        "registration should succeed without warnings, got: {:?}",
+        written.warnings
+    );
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM threads WHERE id = ?1",
+            [&written.session_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "exactly one threads row for the converted session"
+    );
+
+    let (rollout_path, cwd, thread_source): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT rollout_path, cwd, thread_source FROM threads WHERE id = ?1",
+            [&written.session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+
+    assert!(
+        std::path::Path::new(&rollout_path).is_absolute(),
+        "rollout_path must be absolute: {rollout_path}"
+    );
+    assert_eq!(
+        rollout_path,
+        written.paths[0].to_string_lossy(),
+        "threads.rollout_path must point at the written rollout file"
+    );
+    assert_eq!(
+        cwd, "/data/projects/myapp",
+        "threads.cwd must be the workspace"
+    );
+    assert_eq!(
+        thread_source.as_deref(),
+        Some("user"),
+        "threads.thread_source must be 'user'"
+    );
+}
+
+/// A missing Codex state DB must not fail the write; the rollout is still
+/// produced and a clear warning is surfaced.
+#[test]
+fn writer_codex_missing_state_db_warns_but_still_writes() {
+    let _lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CODEX_HOME", tmp.path());
+    // No state_*.sqlite present.
+
+    let written = Codex
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
+        .expect("write should still succeed without a state DB");
+
+    assert!(written.paths[0].exists(), "rollout file should be written");
+    assert!(
+        !written.warnings.is_empty(),
+        "a missing state DB should surface a warning"
+    );
+    assert!(
+        written.warnings.iter().any(|w| w.contains("state_")),
+        "warning should mention the missing state DB: {:?}",
+        written.warnings
+    );
+}
+
+/// The session_meta payload must carry both `id` and `session_id` (Codex reads
+/// one or the other depending on version).
+#[test]
+fn writer_codex_session_meta_has_both_id_and_session_id() {
+    let _lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CODEX_HOME", tmp.path());
+
+    let written = Codex
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
+        .unwrap();
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+
+    let id = meta["payload"]["id"].as_str().expect("payload.id");
+    let session_id = meta["payload"]["session_id"]
+        .as_str()
+        .expect("payload.session_id");
+    assert_eq!(
+        id, session_id,
+        "payload.id and payload.session_id must match"
+    );
+    assert_eq!(id, written.session_id);
+    assert_eq!(
+        meta["payload"]["thread_source"].as_str(),
+        Some("user"),
+        "session_meta payload should mark thread_source=user"
+    );
+}
+
 #[test]
 fn writer_codex_session_meta_is_first_line() {
     let _lock = CODEX_ENV.lock().unwrap();
@@ -477,7 +714,13 @@ fn writer_codex_session_meta_is_first_line() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -505,7 +748,13 @@ fn writer_codex_user_messages_are_event_msg() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -534,7 +783,13 @@ fn writer_codex_assistant_messages_are_response_item() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -576,7 +831,13 @@ fn writer_codex_reasoning_messages() {
     };
 
     let written = Codex
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -601,13 +862,23 @@ fn writer_codex_reasoning_messages() {
 }
 
 #[test]
-fn writer_codex_timestamps_are_iso_strings() {
+fn writer_codex_top_level_timestamps_are_strings() {
+    // Regression for issue #16: current Codex readers deserialize each rollout
+    // line's top-level `timestamp` as an RFC3339 *string*. Emitting numeric
+    // timestamps (the pre-#16 behavior) made the rollout unreadable by Codex
+    // even after the session was discoverable.
     let _lock = CODEX_ENV.lock().unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -616,15 +887,11 @@ fn writer_codex_timestamps_are_iso_strings() {
         let ts = entry.get("timestamp");
         assert!(ts.is_some(), "Codex line {i}: missing timestamp");
         let ts = ts.unwrap();
-        assert!(
-            ts.is_string(),
-            "Codex line {i}: timestamp should be an ISO string, got: {ts}"
-        );
-        let s = ts.as_str().unwrap();
-        assert!(
-            s.contains('T') && s.ends_with('Z'),
-            "Codex line {i}: timestamp {s} is not ISO-8601 format"
-        );
+        let s = ts
+            .as_str()
+            .unwrap_or_else(|| panic!("Codex line {i}: timestamp should be a string, got: {ts}"));
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|e| panic!("Codex line {i}: timestamp not RFC3339 ({e}): {s}"));
     }
 }
 
@@ -635,7 +902,13 @@ fn writer_codex_date_hierarchy_in_path() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let path_str = written.paths[0].to_string_lossy().to_string();
@@ -687,7 +960,13 @@ fn writer_codex_tool_calls_in_response_content() {
     let _env = EnvGuard::set("CODEX_HOME", tmp.path());
 
     let written = Codex
-        .write_session(&tool_call_session(), &WriteOptions::default())
+        .write_session(
+            &tool_call_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -701,24 +980,14 @@ fn writer_codex_tool_calls_in_response_content() {
         .filter(|l| l["type"] == "response_item")
         .collect();
 
-    // First response_item should be a function_call payload (Codex native format).
-    assert_eq!(
-        response_items[0]["payload"]["type"], "function_call",
-        "Codex response_item should contain function_call payload for tool calls"
-    );
-    assert_eq!(response_items[0]["payload"]["name"], "Read");
-
-    // The message response_item should have content as an array of text blocks.
-    let msg_item = response_items
-        .iter()
-        .find(|l| l["payload"]["type"] == "message")
-        .expect("Codex should have a message response_item");
-    let msg_content = msg_item["payload"]["content"]
+    // First response_item should have tool_use in its content blocks.
+    let first_content = response_items[0]["payload"]["content"]
         .as_array()
-        .expect("Codex response_item message content should be array");
+        .expect("Codex response_item content should be array");
+    let has_tool_use = first_content.iter().any(|b| b["type"] == "tool_use");
     assert!(
-        msg_content.iter().any(|b| b["type"] == "output_text"),
-        "Codex response_item message content should contain output_text block"
+        has_tool_use,
+        "Codex response_item should contain tool_use block"
     );
 }
 
@@ -734,7 +1003,13 @@ fn writer_gemini_roundtrip() {
 
     let session = simple_session();
     let written = Gemini
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Gemini write_session should succeed");
 
     assert_eq!(
@@ -783,7 +1058,13 @@ fn writer_gemini_output_valid_json() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -798,7 +1079,13 @@ fn writer_gemini_top_level_fields() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -838,7 +1125,13 @@ fn writer_gemini_message_types() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -864,7 +1157,13 @@ fn writer_gemini_timestamps_are_rfc3339() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -900,7 +1199,13 @@ fn writer_gemini_hash_directory_structure() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let path = &written.paths[0];
@@ -952,7 +1257,13 @@ fn writer_gemini_extra_fields_preserved() {
     });
 
     let written = Gemini
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -976,7 +1287,13 @@ fn writer_gemini_project_hash_matches_workspace() {
     let _env = EnvGuard::set("GEMINI_HOME", tmp.path());
 
     let written = Gemini
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1005,18 +1322,20 @@ fn writer_cc_default_workspace_uses_tmp() {
     session.workspace = None;
 
     let written = ClaudeCode
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     let first: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
-    let expected_cwd = std::env::current_dir()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
     assert_eq!(
-        first["cwd"], expected_cwd,
-        "CC should use CWD when workspace is None"
+        first["cwd"], "/tmp",
+        "CC should fall back to /tmp when workspace is None"
     );
 }
 
@@ -1030,7 +1349,13 @@ fn writer_codex_default_workspace_uses_tmp() {
     session.workspace = None;
 
     let written = Codex
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1053,7 +1378,13 @@ fn writer_cline_roundtrip() {
 
     let session = simple_session();
     let written = Cline
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Cline write_session should succeed");
 
     assert_eq!(written.paths.len(), 3, "Cline should write 3 task files");
@@ -1124,7 +1455,13 @@ fn writer_amp_roundtrip() {
 
     let session = simple_session();
     let written = Amp
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Amp write_session should succeed");
 
     assert_eq!(written.paths.len(), 1, "Amp should write one thread file");
@@ -1175,7 +1512,13 @@ fn writer_amp_output_has_expected_shape() {
     let _env = EnvGuard::set("AMP_HOME", tmp.path());
 
     let written = Amp
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Amp write_session should succeed");
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1209,7 +1552,13 @@ fn writer_chatgpt_roundtrip() {
 
     let session = simple_session();
     let written = ChatGpt
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("ChatGPT write_session should succeed");
 
     assert_eq!(
@@ -1259,7 +1608,13 @@ fn writer_chatgpt_output_valid_json_with_mapping() {
     let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
 
     let written = ChatGpt
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1288,7 +1643,13 @@ fn writer_chatgpt_timestamps_are_float_seconds() {
     let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
 
     let written = ChatGpt
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1312,7 +1673,13 @@ fn writer_chatgpt_mapping_has_parent_chain() {
     let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
 
     let written = ChatGpt
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1342,7 +1709,13 @@ fn writer_clawdbot_roundtrip() {
 
     let session = simple_session();
     let written = ClawdBot
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("ClawdBot write_session should succeed");
 
     assert_eq!(
@@ -1392,7 +1765,13 @@ fn writer_clawdbot_output_valid_jsonl() {
     let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
 
     let written = ClawdBot
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1423,7 +1802,13 @@ fn writer_clawdbot_timestamps_are_rfc3339() {
     let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
 
     let written = ClawdBot
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1449,7 +1834,13 @@ fn writer_vibe_roundtrip() {
 
     let session = simple_session();
     let written = Vibe
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Vibe write_session should succeed");
 
     assert_eq!(
@@ -1493,7 +1884,13 @@ fn writer_vibe_directory_structure() {
     let _env = EnvGuard::set("VIBE_HOME", tmp.path());
 
     let written = Vibe
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let path = &written.paths[0];
@@ -1517,7 +1914,13 @@ fn writer_vibe_output_valid_jsonl() {
     let _env = EnvGuard::set("VIBE_HOME", tmp.path());
 
     let written = Vibe
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1550,7 +1953,13 @@ fn writer_factory_roundtrip() {
 
     let session = simple_session();
     let written = Factory
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("Factory write_session should succeed");
 
     assert_eq!(
@@ -1600,7 +2009,13 @@ fn writer_factory_session_start_header() {
     let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
 
     let written = Factory
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1628,7 +2043,13 @@ fn writer_factory_output_valid_jsonl() {
     let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
 
     let written = Factory
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1653,7 +2074,13 @@ fn writer_factory_message_structure() {
     let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
 
     let written = Factory
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1700,7 +2127,13 @@ fn writer_openclaw_roundtrip() {
 
     let session = simple_session();
     let written = OpenClaw
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("OpenClaw write_session should succeed");
 
     assert_eq!(
@@ -1754,7 +2187,13 @@ fn writer_openclaw_session_header() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1786,7 +2225,13 @@ fn writer_openclaw_output_valid_jsonl() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1811,7 +2256,13 @@ fn writer_openclaw_message_ids_are_sequential() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1838,7 +2289,13 @@ fn writer_openclaw_tool_calls_in_content() {
     let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
 
     let written = OpenClaw
-        .write_session(&tool_call_session(), &WriteOptions::default())
+        .write_session(
+            &tool_call_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1873,7 +2330,13 @@ fn writer_piagent_roundtrip() {
 
     let session = simple_session();
     let written = PiAgent
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .expect("PiAgent write_session should succeed");
 
     assert_eq!(
@@ -1927,7 +2390,13 @@ fn writer_piagent_session_header() {
     let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
 
     let written = PiAgent
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -1955,7 +2424,13 @@ fn writer_piagent_filename_has_underscore() {
     let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
 
     let written = PiAgent
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let filename = written.paths[0].file_name().unwrap().to_str().unwrap();
@@ -1976,7 +2451,13 @@ fn writer_piagent_output_valid_jsonl() {
     let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
 
     let written = PiAgent
-        .write_session(&simple_session(), &WriteOptions::default())
+        .write_session(
+            &simple_session(),
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
@@ -2014,7 +2495,13 @@ fn writer_piagent_tool_role_normalized() {
     };
 
     let written = PiAgent
-        .write_session(&session, &WriteOptions::default())
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
         .unwrap();
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();

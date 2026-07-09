@@ -564,6 +564,16 @@ impl Provider for Amp {
             .get("title")
             .and_then(|v| v.as_str())
             .map(|s| truncate_title(s, 100));
+        // Amp thread titles are user-facing native names (distinct from the
+        // first-user-message fallback derived below).
+        let native_name = title.as_ref().and_then(|t| {
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
 
         let workspace = Self::extract_workspace(&thread);
 
@@ -636,6 +646,16 @@ impl Provider for Amp {
             "read Amp thread"
         );
 
+        // Surface the native thread title under the canonical metadata key so
+        // `casr list`/`info` can render it in the provider-neutral Name column.
+        let mut metadata = thread.clone();
+        if let (Some(name), Some(obj)) = (native_name, metadata.as_object_mut()) {
+            obj.insert(
+                crate::model::NATIVE_NAME_META_KEY.to_string(),
+                serde_json::Value::String(name),
+            );
+        }
+
         Ok(CanonicalSession {
             session_id,
             provider_slug: "amp".to_string(),
@@ -644,7 +664,7 @@ impl Provider for Amp {
             started_at,
             ended_at,
             messages,
-            metadata: thread.clone(),
+            metadata,
             source_path: path.to_path_buf(),
             model_name: None,
         })
@@ -676,6 +696,7 @@ impl Provider for Amp {
             session_id: thread_id.clone(),
             resume_command: self.resume_command(&thread_id),
             backup_path: outcome.backup_path,
+            warnings: Vec::new(),
         })
     }
 

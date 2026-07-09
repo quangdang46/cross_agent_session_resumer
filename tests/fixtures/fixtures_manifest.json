@@ -114,6 +114,14 @@
       "category": "synthetic",
       "intent": "Uses 'gemini' role type instead of 'model'. Tests normalize_role mapping."
     },
+    "agy_simple": {
+      "provider": "antigravity",
+      "format": "sqlite+jsonl",
+      "path": "antigravity/antigravity-cli/conversations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.db",
+      "expected": "expected/agy_simple.json",
+      "category": "synthetic",
+      "intent": "Antigravity (agy) conversation. uuid==db filename stem; content read from sibling brain/<uuid>/.system_generated/logs/transcript.jsonl. Tests housekeeping-step drop, USER_REQUEST unwrap, tool-call extraction, model pin, and gmi disambiguation."
+    },
     "cline_simple": {
       "provider": "cline",
       "format": "json",
