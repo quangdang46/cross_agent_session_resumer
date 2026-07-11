@@ -700,18 +700,24 @@ mod codex_golden {
     #[test]
     fn golden_codex_user_messages_are_event_msg() {
         let (_, content) = write_codex_session(&simple_session());
-        // simple_session: User, Assistant, User → session_meta, event_msg, response_item, event_msg
+        // User turns now emit BOTH response_item (model context) and
+        // event_msg.user_message (UI transcript), matching native Codex.
+        // simple_session: User, Assistant, User →
+        //   session_meta,
+        //   response_item(user), event_msg(user),
+        //   response_item(assistant),
+        //   response_item(user), event_msg(user)
         let lines: Vec<serde_json::Value> = content
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
 
-        // Lines after session_meta: idx 1 is user (event_msg), idx 2 is assistant (response_item),
-        // idx 3 is user (event_msg).
-        assert_eq!(lines[1]["type"], "event_msg");
-        assert_eq!(lines[1]["payload"]["type"], "user_message");
+        assert_eq!(lines[1]["type"], "response_item");
+        assert_eq!(lines[1]["payload"]["role"], "user");
+        assert_eq!(lines[2]["type"], "event_msg");
+        assert_eq!(lines[2]["payload"]["type"], "user_message");
         assert_eq!(
-            lines[1]["payload"]["message"].as_str().unwrap(),
+            lines[2]["payload"]["message"].as_str().unwrap(),
             "Hello, please help me."
         );
     }
@@ -724,13 +730,14 @@ mod codex_golden {
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
 
-        assert_eq!(lines[2]["type"], "response_item");
-        assert_eq!(lines[2]["payload"]["role"], "assistant");
+        // After dual user envelopes, assistant is at index 3.
+        assert_eq!(lines[3]["type"], "response_item");
+        assert_eq!(lines[3]["payload"]["role"], "assistant");
 
         // Assistant turns serialize as `output_text` content blocks. Pre-bd-AMP
         // Codex emitted `input_text` for both roles; the conversion was fixed
         // in 6152b9a / f868918 to align with the native Codex schema.
-        let content_blocks = lines[2]["payload"]["content"].as_array().unwrap();
+        let content_blocks = lines[3]["payload"]["content"].as_array().unwrap();
         assert!(!content_blocks.is_empty());
         assert_eq!(content_blocks[0]["type"], "output_text");
         assert_eq!(content_blocks[0]["text"], "Sure, I can help.");
