@@ -38,6 +38,11 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("FACTORY_HOME", tmp.path().join("factory"))
         .env("OPENCLAW_HOME", tmp.path().join("openclaw"))
         .env("PI_AGENT_HOME", tmp.path().join("pi-agent"))
+        .env("OMP_HOME", tmp.path().join("omp"))
+        .env("KIRO_HOME", tmp.path().join("kiro"))
+        .env("HERMES_HOME", tmp.path().join("hermes"))
+        .env("JCODE_HOME", tmp.path().join("jcode"))
+        .env("GROK_HOME", tmp.path().join("grok"))
         .env("XDG_CONFIG_HOME", tmp.path().join("xdg-config"))
         .env("XDG_DATA_HOME", tmp.path().join("xdg-data"))
         .env("NO_COLOR", "1");
@@ -259,8 +264,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        16,
-        "should list 16 providers (CC, Codex, Gemini, Antigravity, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Pi-Agent, Kiro)"
+        19,
+        "should list 19 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, Kiro, Grok)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -300,6 +305,9 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"openclaw"), "should contain openclaw");
     assert!(slugs.contains(&"pi-agent"), "should contain pi-agent");
     assert!(slugs.contains(&"kiro"), "should contain kiro");
+    assert!(slugs.contains(&"jcode"), "should contain jcode");
+    assert!(slugs.contains(&"hermes"), "should contain hermes");
+    assert!(slugs.contains(&"grok"), "should contain grok");
 }
 
 #[test]
@@ -338,6 +346,9 @@ fn contract_providers_aliases_match_slugs() {
             "openclaw" => assert_eq!(*alias, "ocl"),
             "pi-agent" => assert_eq!(*alias, "pi"),
             "kiro" => assert_eq!(*alias, "kr"),
+            "jcode" => assert_eq!(*alias, "jc"),
+            "hermes" => assert_eq!(*alias, "her"),
+            "grok" => assert_eq!(*alias, "grk"),
             other => panic!("Unexpected slug: {other}"),
         }
     }
@@ -864,8 +875,9 @@ fn contract_error_json_unknown_session() {
         .expect("info should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    // Error JSON is on stdout when --json is set (see main.rs).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     assert_error_envelope(&parsed);
     assert_eq!(parsed["error_type"].as_str().unwrap(), "SessionNotFound");
@@ -882,8 +894,8 @@ fn contract_error_json_unknown_provider() {
         .expect("resume should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     assert_error_envelope(&parsed);
     assert_eq!(
@@ -901,8 +913,8 @@ fn contract_error_json_unknown_resume_session() {
         .expect("resume should run");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     assert_error_envelope(&parsed);
     assert_eq!(parsed["error_type"].as_str().unwrap(), "SessionNotFound");
@@ -916,8 +928,8 @@ fn contract_error_json_message_is_nonempty() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed = parse_json_from_maybe_logged_stream(&stderr, "stderr");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_json_from_maybe_logged_stream(&stdout, "stdout");
 
     let msg = parsed["message"].as_str().unwrap();
     assert!(!msg.is_empty(), "error message should not be empty");
@@ -950,8 +962,8 @@ fn contract_error_json_known_error_types() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let parsed: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let error_type = parsed["error_type"].as_str().unwrap();
     assert!(
         known_types.contains(&error_type),
@@ -960,7 +972,7 @@ fn contract_error_json_known_error_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-cutting: JSON output goes to stdout (success) or stderr (error)
+// Cross-cutting: JSON success and error both go to stdout when --json is set
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -988,7 +1000,7 @@ fn contract_success_json_on_stdout_not_stderr() {
 }
 
 #[test]
-fn contract_error_json_on_stderr_not_stdout() {
+fn contract_error_json_on_stdout_not_stderr() {
     let tmp = TempDir::new().unwrap();
     let output = casr_cmd(&tmp)
         .args(["--json", "info", "no-such-session"])
@@ -996,18 +1008,20 @@ fn contract_error_json_on_stderr_not_stdout() {
         .unwrap();
 
     assert!(!output.status.success());
-    // Error JSON should be on stderr.
+    // Error JSON should be on stdout (machine-readable --json contract).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_ok(),
+        "error JSON should be on stdout"
+    );
+    // Stderr may have logs, but must not be the sole carrier of the error JSON.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&stderr).is_ok(),
-        "error JSON should be on stderr"
-    );
-    // Stdout should be empty on error.
-    assert!(
-        output.stdout.is_empty(),
-        "stdout should be empty on error, got: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    if !stderr.is_empty() {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&stderr).is_err(),
+            "stderr should not contain the error JSON envelope"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1047,7 @@ fn contract_list_provider_field_matches_slug() {
         "codex",
         "gemini",
         "antigravity",
+        "jcode",
         "cursor",
         "cline",
         "aider",
@@ -1043,8 +1058,10 @@ fn contract_list_provider_field_matches_slug() {
         "vibe",
         "factory",
         "openclaw",
+        "hermes",
         "pi-agent",
         "kiro",
+        "grok",
     ];
     for item in items {
         let provider = item["provider"].as_str().unwrap();
