@@ -1133,6 +1133,10 @@ fn cli_resume_cc_to_opencode_works_and_is_discoverable() {
     let opencode_session_id = parsed["target_session_id"]
         .as_str()
         .expect("target_session_id should be present for non-dry-run");
+    assert!(
+        opencode_session_id.starts_with("ses_"),
+        "OpenCode target ids must use ses_ prefix, got {opencode_session_id}"
+    );
 
     let opencode_db = tmp.path().join("opencode/opencode.db");
     assert!(
@@ -1140,15 +1144,22 @@ fn cli_resume_cc_to_opencode_works_and_is_discoverable() {
         "OpenCode DB should exist after CC→OpenCode conversion"
     );
 
-    // The converted OpenCode session now carries a STABLE id derived from the
-    // source session (the #14 fix), so it shares the source CC session's id and
-    // exists under both providers. A bare lookup is therefore ambiguous...
-    casr_cmd(&tmp)
+    // OpenCode forces a `ses_` prefix, so the target id no longer collides with
+    // the Claude Code source id. Bare lookup is unambiguous.
+    let bare = casr_cmd(&tmp)
         .args(["--json", "info", opencode_session_id])
-        .assert()
-        .failure();
+        .output()
+        .expect("info should run");
+    assert!(
+        bare.status.success(),
+        "bare info on ses_* target should succeed: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    let bare_json: serde_json::Value =
+        serde_json::from_slice(&bare.stdout).expect("info --json should parse");
+    assert_eq!(bare_json["provider"].as_str().unwrap(), "opencode");
 
-    // ...and `--source` resolves it to the OpenCode copy specifically.
+    // `--source opc` still resolves explicitly to the OpenCode row.
     let info = casr_cmd(&tmp)
         .args(["--json", "info", opencode_session_id, "--source", "opc"])
         .output()
