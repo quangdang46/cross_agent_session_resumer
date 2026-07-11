@@ -246,12 +246,31 @@ impl Provider for Codex {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = uuid::Uuid::new_v4().to_string();
+        // Prefer the pipeline-supplied deterministic id so re-running the same
+        // conversion (especially with `--force`) overwrites the same thread
+        // instead of minting a new UUID and orphaning the previous rollout.
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now();
+        // Prefer the source session start time for the path stamp so the
+        // rollout filename is stable across force rewrites in the same second
+        // or across second boundaries.
+        let path_stamp = session
+            .started_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .unwrap_or(now);
 
         let sessions_dir = Self::sessions_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot determine Codex sessions directory"))?;
-        let target_path = rollout_path(&sessions_dir, &target_session_id, &now);
+        // If a rollout for this id already exists (prior conversion), rewrite
+        // that exact path so `--force` is path-stable even when the stamp would
+        // otherwise differ.
+        let target_path = self
+            .owns_session(&target_session_id)
+            .unwrap_or_else(|| rollout_path(&sessions_dir, &target_session_id, &path_stamp));
 
         debug!(
             target_session_id,

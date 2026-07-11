@@ -1,7 +1,7 @@
 {
   "fixture_id": "opc_simple",
   "provider_slug": "opencode",
-  "session_id": "ses_opc-session-001",
+  "session_id": "opc-session-001",
   "workspace": "__DYNAMIC__",
   "title": "Set up CI/CD pipeline with GitHub Actions",
   "message_count": 4,
