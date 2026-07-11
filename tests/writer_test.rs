@@ -185,9 +185,12 @@ fn writer_cc_roundtrip() {
             "CC roundtrip msg {i}: content mismatch"
         );
     }
+    // Claude Code writer stamps process CWD into entries (resume from casr's
+    // invocation directory), not the source session workspace.
+    let process_cwd = std::env::current_dir().ok();
     assert_eq!(
-        readback.workspace, session.workspace,
-        "CC roundtrip: workspace"
+        readback.workspace, process_cwd,
+        "CC roundtrip: workspace should be process CWD"
     );
     assert!(
         readback.model_name.is_some(),
@@ -319,11 +322,12 @@ fn writer_cc_workspace_directory_placement() {
         .unwrap();
 
     let path = &written.paths[0];
-    // File should be under <CLAUDE_HOME>/projects/-data-projects-myapp/<uuid>.jsonl
-    let expected_dir_key = "-data-projects-myapp";
+    // Placement follows process CWD project key (not source session workspace).
+    let expected_dir_key =
+        casr::providers::claude_code::project_dir_key(&std::env::current_dir().unwrap());
     let parent = path.parent().unwrap();
     assert!(
-        parent.ends_with(expected_dir_key),
+        parent.ends_with(&expected_dir_key),
         "CC file should be under project dir key '{expected_dir_key}', got: {}",
         parent.display()
     );
@@ -1307,7 +1311,7 @@ fn writer_gemini_project_hash_matches_workspace() {
 // ===========================================================================
 
 #[test]
-fn writer_cc_default_workspace_uses_cwd_or_tmp() {
+fn writer_cc_default_workspace_uses_cwd() {
     let _lock = CC_ENV.lock().unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
@@ -1327,14 +1331,13 @@ fn writer_cc_default_workspace_uses_cwd_or_tmp() {
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     let first: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
-    // When workspace is unset: prefer process CWD (grounded), else `/tmp`.
-    let cwd = first["cwd"].as_str().expect("cwd field should be a string");
     let process_cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
-        .ok();
-    assert!(
-        process_cwd.as_deref() == Some(cwd) || cwd == "/tmp",
-        "CC should fall back to process CWD or /tmp when workspace is None, got {cwd}"
+        .expect("process cwd");
+    assert_eq!(
+        first["cwd"].as_str().unwrap(),
+        process_cwd,
+        "CC should stamp process CWD when writing (workspace None or not)"
     );
 }
 
