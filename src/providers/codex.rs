@@ -323,7 +323,12 @@ impl Provider for Codex {
             }
         }
 
-        let content_bytes = lines.join("\n").into_bytes();
+        // Trailing newline is required: Codex appends new events by writing
+        // after the last byte. Without a final `\n`, the first append glues
+        // onto the last history line and corrupts JSONL.
+        let mut content = lines.join("\n");
+        content.push('\n');
+        let content_bytes = content.into_bytes();
 
         let outcome =
             crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force, self.slug())?;
@@ -778,14 +783,30 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_j
                 && msg.tool_results.is_empty()
                 && !msg.content.is_empty() =>
         {
-            vec![serde_json::json!({
-                "type": "event_msg",
-                "timestamp": msg_ts,
-                "payload": {
-                    "type": "user_message",
-                    "message": msg.content,
-                }
-            })]
+            // Native Codex rollouts store user turns twice:
+            // - `response_item` (model context / API history)
+            // - `event_msg.user_message` (UI transcript)
+            // Emitting only event_msg caused `codex exec resume` to treat the
+            // session as empty of prior turns.
+            vec![
+                serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": codex_text_content_blocks(msg),
+                    }
+                }),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "user_message",
+                        "message": msg.content,
+                    }
+                }),
+            ]
         }
         MessageRole::Assistant if msg.author.as_deref() == Some("reasoning") => {
             vec![serde_json::json!({
@@ -1998,10 +2019,17 @@ not json
             extra: json!({}),
         };
         let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["type"], "event_msg");
-        assert_eq!(events[0]["payload"]["type"], "user_message");
-        assert_eq!(events[0]["payload"]["message"], "Hello from user");
+        assert_eq!(events.len(), 2, "user turns need response_item + event_msg");
+        assert_eq!(events[0]["type"], "response_item");
+        assert_eq!(events[0]["payload"]["type"], "message");
+        assert_eq!(events[0]["payload"]["role"], "user");
+        assert_eq!(
+            events[0]["payload"]["content"][0]["text"],
+            "Hello from user"
+        );
+        assert_eq!(events[1]["type"], "event_msg");
+        assert_eq!(events[1]["payload"]["type"], "user_message");
+        assert_eq!(events[1]["payload"]["message"], "Hello from user");
     }
 
     #[test]

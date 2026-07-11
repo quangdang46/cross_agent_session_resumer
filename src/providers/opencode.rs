@@ -1,14 +1,16 @@
 //! OpenCode provider — reads/writes sessions from SQLite `opencode.db`.
 //!
-//! OpenCode stores session state in a SQLite database named `opencode.db`.
-//! The canonical schema includes:
-//! - `sessions` table
-//! - `messages` table
-//! - `files` table
+//! Supports two on-disk schemas:
 //!
-//! casr addresses specific OpenCode sessions using a virtual path form:
-//! `<db-path>/<urlencoded-session-id>`
-//! This mirrors the approach used by Cursor and Aider providers.
+//! - **V2 (OpenCode ≥ ~1.17)** — tables `session` / `message` / `part` with JSON
+//!   `data` columns. Live CLI stores this under
+//!   `~/.local/share/opencode/opencode.db` (or `$XDG_DATA_HOME/opencode`).
+//! - **Legacy** — tables `sessions` / `messages` / `files` with embedded `parts`
+//!   JSON on each message row. Used by older OpenCode builds and by casr's
+//!   unit-test fixtures (fresh workspace DBs).
+//!
+//! Session IDs must start with `ses_`. casr addresses sessions via a virtual
+//! path form: `<db-path>/<urlencoded-session-id>`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -16,6 +18,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags};
 use tracing::{debug, info, trace};
+
+#[cfg(test)]
+thread_local! {
+    /// Unit-test override for the OpenCode DB path (avoids process-wide env mutation).
+    static TEST_DB_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 use crate::discovery::DetectionResult;
 use crate::model::{
@@ -29,14 +38,32 @@ pub struct OpenCode;
 
 const DB_FILENAME: &str = "opencode.db";
 const DATA_DIRNAME: &str = ".opencode";
+const SHARE_DIRNAME: &str = "opencode";
+
+/// On-disk schema flavor for an OpenCode database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaKind {
+    /// OpenCode 1.17+: `session` / `message` / `part`.
+    V2,
+    /// Older layout: `sessions` / `messages` / `files`.
+    Legacy,
+}
 
 impl OpenCode {
     /// Parse OPENCODE environment overrides into a target DB path.
     ///
     /// Supported overrides:
+    /// - unit-test thread-local (`TEST_DB_PATH_OVERRIDE`)
     /// - `OPENCODE_DB_PATH` (direct file path)
     /// - `OPENCODE_HOME` (directory containing `opencode.db`, or a direct `.db` path)
     fn env_db_path() -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            if let Some(path) = TEST_DB_PATH_OVERRIDE.with(|cell| cell.borrow().clone()) {
+                return Some(path);
+            }
+        }
+
         if let Ok(path) = std::env::var("OPENCODE_DB_PATH")
             && !path.trim().is_empty()
         {
@@ -54,6 +81,44 @@ impl OpenCode {
         }
 
         None
+    }
+
+    /// Candidate global DBs used by modern OpenCode CLI (`opencode run -s …`).
+    ///
+    /// OpenCode follows XDG even on macOS (`~/.local/share/opencode`), while
+    /// `dirs::data_local_dir()` returns `~/Library/Application Support` on Darwin.
+    /// Probe both, plus `$XDG_DATA_HOME`.
+    fn global_share_db_candidates() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+            && !xdg.trim().is_empty()
+        {
+            paths.push(PathBuf::from(xdg).join(SHARE_DIRNAME).join(DB_FILENAME));
+        }
+        if let Some(home) = dirs::home_dir() {
+            paths.push(
+                home.join(".local")
+                    .join("share")
+                    .join(SHARE_DIRNAME)
+                    .join(DB_FILENAME),
+            );
+        }
+        if let Some(data) = dirs::data_local_dir() {
+            paths.push(data.join(SHARE_DIRNAME).join(DB_FILENAME));
+        }
+        // Dedup while preserving order.
+        let mut seen = BTreeSet::new();
+        paths
+            .into_iter()
+            .filter(|p| seen.insert(p.clone()))
+            .collect()
+    }
+
+    /// First existing global share DB, if any.
+    fn global_share_db_path() -> Option<PathBuf> {
+        Self::global_share_db_candidates()
+            .into_iter()
+            .find(|p| p.is_file())
     }
 
     /// Candidate global config files that may contain `data.directory`.
@@ -125,6 +190,8 @@ impl OpenCode {
         }
 
         let mut candidates = Vec::new();
+        // Prefer the global share DB the modern CLI actually opens.
+        candidates.extend(Self::global_share_db_candidates());
         candidates.extend(Self::cwd_ancestor_db_paths());
         if let Some(home) = dirs::home_dir() {
             candidates.push(home.join(DATA_DIRNAME).join(DB_FILENAME));
@@ -137,9 +204,21 @@ impl OpenCode {
     }
 
     /// Resolve target DB path for writes.
+    ///
+    /// Priority:
+    /// 1. `OPENCODE_DB_PATH` / `OPENCODE_HOME`
+    /// 2. Existing global share DB (`~/.local/share/opencode/opencode.db`) — this is
+    ///    what `opencode run -s` reads
+    /// 3. Workspace `.opencode/opencode.db` (or CWD fallback)
     fn choose_target_db_path(session: &CanonicalSession) -> anyhow::Result<PathBuf> {
         if let Some(env_db) = Self::env_db_path() {
             return Ok(env_db);
+        }
+
+        if let Some(global) = Self::global_share_db_path()
+            && global.is_file()
+        {
+            return Ok(global);
         }
 
         if let Some(workspace) = &session.workspace {
@@ -152,6 +231,26 @@ impl OpenCode {
 
         let cwd = std::env::current_dir().context("failed to determine current directory")?;
         Ok(cwd.join(DATA_DIRNAME).join(DB_FILENAME))
+    }
+
+    fn detect_schema(conn: &Connection) -> SchemaKind {
+        if Self::table_exists(conn, "session") && Self::table_exists(conn, "message") {
+            SchemaKind::V2
+        } else {
+            SchemaKind::Legacy
+        }
+    }
+
+    fn ensure_ses_prefix(id: &str) -> String {
+        if id.starts_with("ses_") {
+            id.to_string()
+        } else {
+            format!("ses_{id}")
+        }
+    }
+
+    fn mint_entity_id(prefix: &str) -> String {
+        format!("{prefix}{}", uuid::Uuid::new_v4().simple())
     }
 
     /// Build virtual per-session path: `<db-path>/<urlencoded-session-id>`.
@@ -268,25 +367,45 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
     }
 
     fn session_exists(conn: &Connection, session_id: &str) -> bool {
-        if !Self::table_exists(conn, "sessions") {
-            return false;
+        match Self::detect_schema(conn) {
+            SchemaKind::V2 => conn
+                .prepare("SELECT 1 FROM session WHERE id = ?1 LIMIT 1")
+                .and_then(|mut stmt| stmt.exists(rusqlite::params![session_id]))
+                .unwrap_or(false),
+            SchemaKind::Legacy => {
+                if !Self::table_exists(conn, "sessions") {
+                    return false;
+                }
+                conn.prepare("SELECT 1 FROM sessions WHERE id = ?1 LIMIT 1")
+                    .and_then(|mut stmt| stmt.exists(rusqlite::params![session_id]))
+                    .unwrap_or(false)
+            }
         }
-        conn.prepare("SELECT 1 FROM sessions WHERE id = ?1 LIMIT 1")
-            .and_then(|mut stmt| stmt.exists(rusqlite::params![session_id]))
-            .unwrap_or(false)
     }
 
     fn newest_root_session_id(conn: &Connection) -> Option<String> {
-        if !Self::table_exists(conn, "sessions") {
-            return None;
+        match Self::detect_schema(conn) {
+            SchemaKind::V2 => conn
+                .query_row(
+                    "SELECT id FROM session WHERE parent_id IS NULL
+                     ORDER BY time_created DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok(),
+            SchemaKind::Legacy => {
+                if !Self::table_exists(conn, "sessions") {
+                    return None;
+                }
+                conn.query_row(
+                    "SELECT id FROM sessions WHERE parent_session_id IS NULL
+                     ORDER BY created_at DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()
+            }
         }
-
-        conn.query_row(
-            "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .ok()
     }
 
     fn workspace_from_db_path(db_path: &Path) -> Option<PathBuf> {
@@ -294,10 +413,22 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
         if data_dir.file_name().and_then(|n| n.to_str()) == Some(DATA_DIRNAME) {
             return data_dir.parent().map(Path::to_path_buf);
         }
+        // Global share DB has no project parent — workspace comes from the row.
         None
     }
 
     fn read_session_by_id(
+        conn: &Connection,
+        db_path: &Path,
+        session_id: &str,
+    ) -> anyhow::Result<CanonicalSession> {
+        match Self::detect_schema(conn) {
+            SchemaKind::V2 => Self::read_session_v2(conn, db_path, session_id),
+            SchemaKind::Legacy => Self::read_session_legacy(conn, db_path, session_id),
+        }
+    }
+
+    fn read_session_legacy(
         conn: &Connection,
         db_path: &Path,
         session_id: &str,
@@ -440,9 +571,212 @@ CREATE INDEX IF NOT EXISTS idx_files_session_id ON files (session_id);
             messages,
             metadata: serde_json::json!({
                 "opencode_db": db_path.display().to_string(),
+                "opencode_schema": "legacy",
                 "parent_session_id": parent_session_id,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "cost": cost,
+            }),
+            source_path: source,
+            model_name,
+        })
+    }
+
+    fn read_session_v2(
+        conn: &Connection,
+        db_path: &Path,
+        session_id: &str,
+    ) -> anyhow::Result<CanonicalSession> {
+        // Group columns to keep the tuple under clippy's type-complexity threshold.
+        struct SessionRow {
+            title: String,
+            directory: String,
+            parent_id: Option<String>,
+            model_json: Option<String>,
+            agent: Option<String>,
+            created_raw: i64,
+            updated_raw: i64,
+            cost: f64,
+        }
+        let row = conn
+            .query_row(
+                "SELECT title, directory, parent_id, model, agent, time_created, time_updated, cost
+                 FROM session
+                 WHERE id = ?1
+                 LIMIT 1",
+                rusqlite::params![session_id],
+                |row| {
+                    Ok(SessionRow {
+                        title: row.get(0)?,
+                        directory: row.get(1)?,
+                        parent_id: row.get(2)?,
+                        model_json: row.get(3)?,
+                        agent: row.get(4)?,
+                        created_raw: row.get(5)?,
+                        updated_raw: row.get(6)?,
+                        cost: row.get(7)?,
+                    })
+                },
+            )
+            .with_context(|| {
+                format!("session '{session_id}' not found in {}", db_path.display())
+            })?;
+        let SessionRow {
+            title: title_raw,
+            directory,
+            parent_id,
+            model_json,
+            agent,
+            created_raw,
+            updated_raw,
+            cost,
+        } = row;
+
+        let mut started_at = parse_timestamp(&serde_json::Value::from(created_raw));
+        let mut ended_at = parse_timestamp(&serde_json::Value::from(updated_raw)).or(started_at);
+        let mut model_counts: HashMap<String, usize> = HashMap::new();
+        let mut messages = Vec::new();
+
+        let mut msg_stmt = conn
+            .prepare(
+                "SELECT id, data, time_created, time_updated
+                 FROM message
+                 WHERE session_id = ?1
+                 ORDER BY time_created ASC, id ASC",
+            )
+            .context("failed to prepare v2 message query")?;
+
+        let msg_rows = msg_stmt.query_map(rusqlite::params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+
+        for row in msg_rows {
+            let (message_id, data_json, created_at_raw, _updated_at_raw) = row?;
+            let data: serde_json::Value =
+                serde_json::from_str(&data_json).unwrap_or_else(|_| serde_json::json!({}));
+            let role_raw = data
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("other");
+
+            let timestamp =
+                parse_timestamp(&serde_json::Value::from(created_at_raw)).or(Some(created_at_raw));
+            if let Some(ts) = timestamp {
+                started_at = Some(started_at.map_or(ts, |current| current.min(ts)));
+                ended_at = Some(ended_at.map_or(ts, |current| current.max(ts)));
+            }
+
+            // Load parts for this message.
+            let mut part_stmt = conn
+                .prepare(
+                    "SELECT data FROM part
+                     WHERE message_id = ?1
+                     ORDER BY time_created ASC, id ASC",
+                )
+                .context("failed to prepare v2 part query")?;
+            let part_rows = part_stmt
+                .query_map(rusqlite::params![message_id], |row| row.get::<_, String>(0))?;
+            let mut parts_arr = Vec::new();
+            for prow in part_rows {
+                let pjson = prow?;
+                if let Ok(pval) = serde_json::from_str::<serde_json::Value>(&pjson) {
+                    parts_arr.push(pval);
+                }
+            }
+            let raw_parts = serde_json::Value::Array(parts_arr);
+            let (content, tool_calls, tool_results) = parse_parts(&raw_parts);
+
+            let model = data
+                .get("modelID")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    data.pointer("/model/modelID")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| {
+                    data.pointer("/model/id")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .filter(|m| !m.is_empty())
+                .map(ToString::to_string);
+
+            if let Some(model_name) = model.as_deref() {
+                *model_counts.entry(model_name.to_string()).or_insert(0) += 1;
+            }
+
+            messages.push(CanonicalMessage {
+                idx: 0,
+                role: normalize_role(role_raw),
+                content,
+                timestamp,
+                author: model,
+                tool_calls,
+                tool_results,
+                extra: serde_json::json!({
+                    "opencode_message_id": message_id,
+                    "opencode_message_data": data,
+                    "opencode_parts": raw_parts,
+                }),
+            });
+        }
+
+        reindex_messages(&mut messages);
+
+        let title = (!title_raw.trim().is_empty())
+            .then_some(title_raw)
+            .or_else(|| {
+                messages
+                    .iter()
+                    .find(|m| m.role == MessageRole::User)
+                    .map(|m| truncate_title(&m.content, 80))
+                    .filter(|t| !t.is_empty())
+            });
+
+        // Prefer per-message models; fall back to session.model JSON.
+        let model_name = model_counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(name, _)| name)
+            .or_else(|| {
+                model_json.as_deref().and_then(|raw| {
+                    serde_json::from_str::<serde_json::Value>(raw)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(ToString::to_string)
+                        })
+                })
+            });
+
+        let workspace = if directory.trim().is_empty() {
+            Self::workspace_from_db_path(db_path)
+        } else {
+            Some(PathBuf::from(&directory))
+        };
+
+        let source = Self::virtual_session_path(db_path, session_id);
+
+        Ok(CanonicalSession {
+            session_id: session_id.to_string(),
+            provider_slug: "opencode".to_string(),
+            workspace,
+            title,
+            started_at,
+            ended_at,
+            messages,
+            metadata: serde_json::json!({
+                "opencode_db": db_path.display().to_string(),
+                "opencode_schema": "v2",
+                "parent_session_id": parent_id,
+                "directory": directory,
+                "agent": agent,
                 "cost": cost,
             }),
             source_path: source,
@@ -496,20 +830,26 @@ impl Provider for OpenCode {
     }
 
     fn owns_session(&self, session_id: &str) -> Option<PathBuf> {
+        let candidates: Vec<String> = if session_id.starts_with("ses_") {
+            vec![session_id.to_string()]
+        } else {
+            vec![session_id.to_string(), format!("ses_{session_id}")]
+        };
         for db_path in Self::find_db_files() {
             let Ok(conn) = Self::open_db(&db_path) else {
                 continue;
             };
-
-            if Self::session_exists(&conn, session_id) {
-                let virtual_path = Self::virtual_session_path(&db_path, session_id);
-                debug!(
-                    db = %db_path.display(),
-                    session = %virtual_path.display(),
-                    session_id,
-                    "found OpenCode session"
-                );
-                return Some(virtual_path);
+            for id in &candidates {
+                if Self::session_exists(&conn, id) {
+                    let virtual_path = Self::virtual_session_path(&db_path, id);
+                    debug!(
+                        db = %db_path.display(),
+                        session = %virtual_path.display(),
+                        session_id = %id,
+                        "found OpenCode session"
+                    );
+                    return Some(virtual_path);
+                }
             }
         }
         None
@@ -539,45 +879,36 @@ impl Provider for OpenCode {
     ) -> anyhow::Result<WrittenSession> {
         let db_path = Self::choose_target_db_path(session)?;
         let mut conn = Self::open_db_rw(&db_path)?;
-        Self::ensure_schema(&conn)?;
 
-        let has_count_trigger =
-            Self::trigger_exists(&conn, "update_session_message_count_on_insert");
+        // Prefer pipeline-supplied deterministic id, else source session id,
+        // else a fresh UUID. OpenCode CLI requires IDs to start with `ses_`.
+        let raw_id = opts
+            .target_session_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                if session.session_id.is_empty() {
+                    None
+                } else {
+                    Some(session.session_id.clone())
+                }
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = Self::ensure_ses_prefix(&raw_id);
 
-        // Derive a STABLE target id from the source session so re-converting the
-        // same session targets the same row (matching the clawdbot/cursor/pi_agent
-        // idiom). This makes `--force` meaningful: without a stable id every run
-        // would silently create an orphaned duplicate row, and with a colliding id
-        // the INSERT would otherwise fail on the PRIMARY KEY. Fall back to a random
-        // UUID only when the source has no id.
-        let target_session_id = if session.session_id.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            session.session_id.clone()
-        };
+        // Empty / new DBs: create legacy schema (unit tests + workspace DBs).
+        // Existing V2 global DBs keep their schema.
+        let schema =
+            if Self::table_exists(&conn, "session") || Self::table_exists(&conn, "sessions") {
+                Self::detect_schema(&conn)
+            } else {
+                Self::ensure_schema(&conn)?;
+                SchemaKind::Legacy
+            };
 
-        // Honor `--force`: if the target session already exists, either overwrite
-        // it (delete-then-insert; `ON DELETE CASCADE` clears messages/files) or
-        // return a clean conflict error, matching the cursor provider's behavior.
         if Self::session_exists(&conn, &target_session_id) {
             if opts.force {
-                // `ensure_schema` already enabled `PRAGMA foreign_keys = ON` on
-                // this connection, so deleting the session cascades to messages
-                // and files. Delete dependents explicitly too, in case the live
-                // DB predates the FK constraint or has the pragma disabled.
-                let _ = conn.execute(
-                    "DELETE FROM files WHERE session_id = ?1",
-                    rusqlite::params![target_session_id],
-                );
-                let _ = conn.execute(
-                    "DELETE FROM messages WHERE session_id = ?1",
-                    rusqlite::params![target_session_id],
-                );
-                conn.execute(
-                    "DELETE FROM sessions WHERE id = ?1",
-                    rusqlite::params![target_session_id],
-                )
-                .context("failed to delete existing OpenCode session for --force overwrite")?;
+                Self::delete_session_cascade(&conn, schema, &target_session_id)?;
             } else {
                 return Err(crate::error::CasrError::SessionConflict {
                     session_id: target_session_id,
@@ -587,19 +918,137 @@ impl Provider for OpenCode {
             }
         }
 
+        match schema {
+            SchemaKind::V2 => Self::write_session_v2(&mut conn, session, &target_session_id)?,
+            SchemaKind::Legacy => {
+                Self::write_session_legacy(&mut conn, session, &target_session_id)?;
+            }
+        }
+
+        let virtual_path = Self::virtual_session_path(&db_path, &target_session_id);
+        info!(
+            session_id = target_session_id,
+            path = %db_path.display(),
+            schema = ?schema,
+            messages = session.messages.len(),
+            "OpenCode session written"
+        );
+
+        Ok(WrittenSession {
+            paths: vec![virtual_path],
+            session_id: target_session_id.clone(),
+            resume_command: self.resume_command(&target_session_id),
+            backup_path: None,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn resume_command(&self, session_id: &str) -> String {
+        // OpenCode non-interactive resume uses `run -s <id>`; IDs must be
+        // `ses_…` (enforced on write).
+        let id = Self::ensure_ses_prefix(session_id);
+        format!("opencode run -s {id}")
+    }
+
+    fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
+        let db_files = Self::find_db_files();
+        if db_files.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for db_path in &db_files {
+            let Ok(conn) = Self::open_db(db_path) else {
+                continue;
+            };
+            let sql = match Self::detect_schema(&conn) {
+                SchemaKind::V2 => "SELECT id FROM session ORDER BY time_created DESC",
+                SchemaKind::Legacy => {
+                    if !Self::table_exists(&conn, "sessions") {
+                        continue;
+                    }
+                    "SELECT id FROM sessions ORDER BY created_at DESC"
+                }
+            };
+
+            let Ok(mut stmt) = conn.prepare(sql) else {
+                continue;
+            };
+
+            let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+                continue;
+            };
+
+            for row in rows.flatten() {
+                let virtual_path = Self::virtual_session_path(db_path, &row);
+                results.push((row, virtual_path));
+            }
+        }
+
+        Some(results)
+    }
+}
+
+impl OpenCode {
+    fn delete_session_cascade(
+        conn: &Connection,
+        schema: SchemaKind,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        match schema {
+            SchemaKind::V2 => {
+                // Cascade covers most dependents; delete explicitly for safety.
+                for table in [
+                    "part",
+                    "message",
+                    "session_message",
+                    "session_input",
+                    "session_context_epoch",
+                    "todo",
+                    "session_share",
+                ] {
+                    if Self::table_exists(conn, table) {
+                        let sql = format!("DELETE FROM {table} WHERE session_id = ?1");
+                        let _ = conn.execute(&sql, rusqlite::params![session_id]);
+                    }
+                }
+                conn.execute(
+                    "DELETE FROM session WHERE id = ?1",
+                    rusqlite::params![session_id],
+                )
+                .context("failed to delete existing OpenCode v2 session for --force")?;
+            }
+            SchemaKind::Legacy => {
+                let _ = conn.execute(
+                    "DELETE FROM files WHERE session_id = ?1",
+                    rusqlite::params![session_id],
+                );
+                let _ = conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?1",
+                    rusqlite::params![session_id],
+                );
+                conn.execute(
+                    "DELETE FROM sessions WHERE id = ?1",
+                    rusqlite::params![session_id],
+                )
+                .context("failed to delete existing OpenCode legacy session for --force")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_session_legacy(
+        conn: &mut Connection,
+        session: &CanonicalSession,
+        target_session_id: &str,
+    ) -> anyhow::Result<()> {
+        let has_count_trigger =
+            Self::trigger_exists(conn, "update_session_message_count_on_insert");
+
         let now = chrono::Utc::now().timestamp_millis();
         let created_at = session.started_at.unwrap_or(now);
         let updated_at = session.ended_at.unwrap_or(now);
-
-        let title = session.title.clone().or_else(|| {
-            session
-                .messages
-                .iter()
-                .find(|m| m.role == MessageRole::User)
-                .map(|m| truncate_title(&m.content, 80))
-                .filter(|t| !t.is_empty())
-        });
-        let title = title.unwrap_or_else(|| "Converted session".to_string());
+        let title = session_title(session);
 
         let tx = conn.transaction().context("failed to begin transaction")?;
 
@@ -620,7 +1069,7 @@ impl Provider for OpenCode {
                 created_at,
             ],
         )
-        .context("failed to insert OpenCode session")?;
+        .context("failed to insert OpenCode legacy session")?;
 
         let default_model = session.model_name.clone();
         for msg in &session.messages {
@@ -648,7 +1097,6 @@ impl Provider for OpenCode {
             .with_context(|| format!("failed to insert OpenCode message {}", msg.idx))?;
         }
 
-        // If the DB has no count trigger, set message_count explicitly.
         if !has_count_trigger {
             tx.execute(
                 "UPDATE sessions SET message_count = ?1 WHERE id = ?2",
@@ -660,62 +1108,296 @@ impl Provider for OpenCode {
             .context("failed to update OpenCode session message_count")?;
         }
 
-        tx.commit().context("failed to commit transaction")?;
+        tx.commit().context("failed to commit legacy write")?;
+        Ok(())
+    }
 
-        let virtual_path = Self::virtual_session_path(&db_path, &target_session_id);
-        info!(
-            session_id = target_session_id,
-            path = %db_path.display(),
-            messages = session.messages.len(),
-            "OpenCode session written"
-        );
+    fn write_session_v2(
+        conn: &mut Connection,
+        session: &CanonicalSession,
+        target_session_id: &str,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let created_at = session.started_at.unwrap_or(now);
+        let updated_at = session.ended_at.unwrap_or(now);
+        let title = session_title(session);
 
-        Ok(WrittenSession {
-            paths: vec![virtual_path],
-            session_id: target_session_id.clone(),
-            resume_command: self.resume_command(&target_session_id),
-            backup_path: None,
-            warnings: Vec::new(),
+        let directory = session
+            .workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "/".to_string())
+            });
+        let path_field = directory.trim_start_matches('/').to_string();
+
+        // Prefer an existing project row for this worktree; else `global`.
+        let project_id: String = conn
+            .query_row(
+                "SELECT id FROM project WHERE worktree = ?1 LIMIT 1",
+                rusqlite::params![directory],
+                |row| row.get(0),
+            )
+            .or_else(|_| {
+                conn.query_row(
+                    "SELECT id FROM project WHERE id = 'global' LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap_or_else(|_| "global".to_string());
+
+        // Ensure the project row exists (fresh DBs / missing global).
+        if !conn
+            .prepare("SELECT 1 FROM project WHERE id = ?1 LIMIT 1")
+            .and_then(|mut s| s.exists(rusqlite::params![project_id]))
+            .unwrap_or(false)
+        {
+            let worktree = if project_id == "global" {
+                "/".to_string()
+            } else {
+                directory.clone()
+            };
+            conn.execute(
+                "INSERT INTO project (
+                    id, worktree, vcs, name, icon_url, icon_url_override, icon_color,
+                    time_created, time_updated, time_initialized, sandboxes, commands
+                 ) VALUES (?1, ?2, NULL, NULL, NULL, NULL, NULL, ?3, ?3, NULL, '[]', NULL)",
+                rusqlite::params![project_id, worktree, now],
+            )
+            .context("failed to insert OpenCode project row")?;
+        }
+
+        let model_id = session
+            .model_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let model_json = serde_json::json!({
+            "id": model_id,
+            "providerID": "opencode-go",
+            "variant": "default",
         })
-    }
+        .to_string();
 
-    fn resume_command(&self, _session_id: &str) -> String {
-        // OpenCode has no session-id-specific resume flag.
-        "opencode".to_string()
-    }
+        let slug = slug_from_title(&title);
+        let version = "1.17.11";
 
-    fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
-        let db_files = Self::find_db_files();
-        if db_files.is_empty() {
-            return Some(Vec::new());
-        }
+        let tx = conn
+            .transaction()
+            .context("failed to begin v2 transaction")?;
 
-        let mut results = Vec::new();
-        for db_path in &db_files {
-            let Ok(conn) = Self::open_db(db_path) else {
-                continue;
-            };
-            if !Self::table_exists(&conn, "sessions") {
-                continue;
+        tx.execute(
+            "INSERT INTO session (
+                id, project_id, workspace_id, parent_id, slug, directory, path, title, version,
+                share_url, summary_additions, summary_deletions, summary_files, summary_diffs,
+                metadata, cost, tokens_input, tokens_output, tokens_reasoning,
+                tokens_cache_read, tokens_cache_write, revert, permission, agent, model,
+                time_created, time_updated, time_compacting, time_archived
+             ) VALUES (
+                ?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7,
+                NULL, NULL, NULL, NULL, NULL,
+                NULL, 0.0, 0, 0, 0, 0, 0, NULL, NULL, 'build', ?8,
+                ?9, ?10, NULL, NULL
+             )",
+            rusqlite::params![
+                target_session_id,
+                project_id,
+                slug,
+                directory,
+                path_field,
+                title,
+                version,
+                model_json,
+                created_at,
+                updated_at,
+            ],
+        )
+        .context("failed to insert OpenCode v2 session")?;
+
+        let mut parent_msg_id: Option<String> = None;
+        for msg in &session.messages {
+            let message_id = Self::mint_entity_id("msg_");
+            let timestamp = msg.timestamp.unwrap_or(created_at);
+            let model = msg
+                .author
+                .clone()
+                .or_else(|| session.model_name.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let mut data = serde_json::json!({
+                "role": role_to_opencode(&msg.role),
+                "time": { "created": timestamp },
+                "agent": "build",
+            });
+
+            match msg.role {
+                MessageRole::User => {
+                    data["model"] = serde_json::json!({
+                        "providerID": "opencode-go",
+                        "modelID": model,
+                    });
+                    data["summary"] = serde_json::json!({ "diffs": [] });
+                }
+                MessageRole::Assistant => {
+                    if let Some(parent) = &parent_msg_id {
+                        data["parentID"] = serde_json::Value::String(parent.clone());
+                    }
+                    data["mode"] = serde_json::json!("build");
+                    data["path"] = serde_json::json!({
+                        "cwd": directory,
+                        "root": directory,
+                    });
+                    data["cost"] = serde_json::json!(0);
+                    data["tokens"] = serde_json::json!({
+                        "total": 0,
+                        "input": 0,
+                        "output": 0,
+                        "reasoning": 0,
+                        "cache": { "write": 0, "read": 0 },
+                    });
+                    data["modelID"] = serde_json::Value::String(model.clone());
+                    data["providerID"] = serde_json::json!("opencode-go");
+                    data["time"] = serde_json::json!({
+                        "created": timestamp,
+                        "completed": timestamp,
+                    });
+                    data["finish"] = serde_json::json!("stop");
+                }
+                _ => {}
             }
 
-            let Ok(mut stmt) = conn.prepare("SELECT id FROM sessions ORDER BY created_at DESC")
-            else {
-                continue;
-            };
+            let data_json =
+                serde_json::to_string(&data).context("serialize OpenCode v2 message data")?;
 
-            let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
-                continue;
-            };
+            tx.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES (?1, ?2, ?3, ?3, ?4)",
+                rusqlite::params![message_id, target_session_id, timestamp, data_json],
+            )
+            .with_context(|| format!("failed to insert OpenCode v2 message {}", msg.idx))?;
 
-            for row in rows.flatten() {
-                let virtual_path = Self::virtual_session_path(db_path, &row);
-                results.push((row, virtual_path));
+            // Emit flat part rows (v2 shape: type/text at top level, not nested data).
+            let part_specs = build_parts_v2(msg);
+            for part_data in part_specs {
+                let part_id = Self::mint_entity_id("prt_");
+                let mut pdata = part_data;
+                if let Some(obj) = pdata.as_object_mut() {
+                    obj.insert("id".to_string(), serde_json::Value::String(part_id.clone()));
+                    obj.insert(
+                        "sessionID".to_string(),
+                        serde_json::Value::String(target_session_id.to_string()),
+                    );
+                    obj.insert(
+                        "messageID".to_string(),
+                        serde_json::Value::String(message_id.clone()),
+                    );
+                }
+                let pjson = serde_json::to_string(&pdata).context("serialize OpenCode v2 part")?;
+                tx.execute(
+                    "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+                     VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                    rusqlite::params![part_id, message_id, target_session_id, timestamp, pjson],
+                )
+                .context("failed to insert OpenCode v2 part")?;
+            }
+
+            if matches!(msg.role, MessageRole::User | MessageRole::Assistant) {
+                parent_msg_id = Some(message_id);
             }
         }
 
-        Some(results)
+        tx.commit().context("failed to commit v2 write")?;
+        Ok(())
     }
+}
+
+fn session_title(session: &CanonicalSession) -> String {
+    session
+        .title
+        .clone()
+        .or_else(|| {
+            session
+                .messages
+                .iter()
+                .find(|m| m.role == MessageRole::User)
+                .map(|m| truncate_title(&m.content, 80))
+                .filter(|t| !t.is_empty())
+        })
+        .unwrap_or_else(|| "Converted session".to_string())
+}
+
+fn slug_from_title(title: &str) -> String {
+    let mut slug: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "casr-import".to_string()
+    } else {
+        slug.chars().take(40).collect()
+    }
+}
+
+/// V2 part rows store flat objects (`{"type":"text","text":"..."}`), not the
+/// legacy nested `{"type":"text","data":{...}}` envelope.
+fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
+    let mut parts = Vec::new();
+
+    if !message.content.trim().is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": message.content,
+        }));
+    }
+
+    for call in &message.tool_calls {
+        let input = if let Some(s) = call.arguments.as_str() {
+            s.to_string()
+        } else {
+            serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
+        };
+        parts.push(serde_json::json!({
+            "type": "tool",
+            "tool": call.name,
+            "callID": call.id.clone().unwrap_or_default(),
+            "state": {
+                "status": "completed",
+                "input": input,
+            }
+        }));
+    }
+
+    for result in &message.tool_results {
+        // Tool results in v2 often live as tool-state updates; emit a text
+        // fallback so content is not dropped when the CLI only surfaces text.
+        if !result.content.trim().is_empty() {
+            parts.push(serde_json::json!({
+                "type": "text",
+                "text": result.content,
+            }));
+        }
+    }
+
+    if parts.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": "",
+        }));
+    }
+
+    parts
 }
 
 fn dedup_existing_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -751,44 +1433,67 @@ fn parse_parts(parts: &serde_json::Value) -> (String, Vec<ToolCall>, Vec<ToolRes
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let data = item.get("data").unwrap_or(&serde_json::Value::Null);
+        // Legacy nested envelope: {"type":"text","data":{...}}
+        // V2 flat envelope:       {"type":"text","text":"..."}
+        let nested = item.get("data");
+        let data = nested.unwrap_or(item);
 
         match part_type {
             "text" => {
-                if let Some(text) = data.get("text").and_then(serde_json::Value::as_str)
+                let text = data
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| item.get("text").and_then(serde_json::Value::as_str));
+                if let Some(text) = text
                     && !text.trim().is_empty()
                 {
                     text_chunks.push(text.to_string());
                 }
             }
             "reasoning" => {
-                if let Some(thinking) = data.get("thinking").and_then(serde_json::Value::as_str)
+                let thinking = data
+                    .get("thinking")
+                    .or_else(|| data.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| item.get("text").and_then(serde_json::Value::as_str));
+                if let Some(thinking) = thinking
                     && !thinking.trim().is_empty()
                 {
                     reasoning_chunks.push(thinking.to_string());
                 }
             }
-            "tool_call" => {
+            "tool_call" | "tool" => {
                 let name = data
                     .get("name")
+                    .or_else(|| data.get("tool"))
+                    .or_else(|| item.get("tool"))
                     .and_then(serde_json::Value::as_str)
                     .filter(|name| !name.is_empty())
                     .unwrap_or("tool_call")
                     .to_string();
                 let id = data
                     .get("id")
+                    .or_else(|| data.get("callID"))
+                    .or_else(|| item.get("callID"))
                     .and_then(serde_json::Value::as_str)
                     .filter(|id| !id.is_empty())
                     .map(ToString::to_string);
                 let input = data
                     .get("input")
-                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| data.pointer("/state/input"))
+                    .map(|v| {
+                        if let Some(s) = v.as_str() {
+                            s.to_string()
+                        } else {
+                            v.to_string()
+                        }
+                    })
                     .unwrap_or_default();
 
                 tool_calls.push(ToolCall {
                     id,
                     name,
-                    arguments: parse_tool_call_arguments(input),
+                    arguments: parse_tool_call_arguments(&input),
                 });
             }
             "tool_result" => {
@@ -799,6 +1504,7 @@ fn parse_parts(parts: &serde_json::Value) -> (String, Vec<ToolCall>, Vec<ToolRes
                     .to_string();
                 let call_id = data
                     .get("tool_call_id")
+                    .or_else(|| data.get("callID"))
                     .and_then(serde_json::Value::as_str)
                     .filter(|id| !id.is_empty())
                     .map(ToString::to_string);
@@ -812,6 +1518,9 @@ fn parse_parts(parts: &serde_json::Value) -> (String, Vec<ToolCall>, Vec<ToolRes
                     content,
                     is_error,
                 });
+            }
+            "step-start" | "step-finish" => {
+                // Structural markers — ignore.
             }
             _ => {
                 let fallback = flatten_content(data);
@@ -919,6 +1628,55 @@ mod tests {
         }
     }
 
+    /// Pin the thread-local DB override so unit tests never touch the real
+    /// global `~/.local/share/opencode/opencode.db`.
+    struct EnvDbGuard;
+
+    impl EnvDbGuard {
+        fn pin(db_path: &Path) -> Self {
+            TEST_DB_PATH_OVERRIDE.with(|cell| {
+                *cell.borrow_mut() = Some(db_path.to_path_buf());
+            });
+            Self
+        }
+    }
+
+    impl Drop for EnvDbGuard {
+        fn drop(&mut self) {
+            TEST_DB_PATH_OVERRIDE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        }
+    }
+
+    /// Temp workspace + isolated OpenCode DB for write tests.
+    fn test_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, CwdGuard, EnvDbGuard) {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".opencode")).expect("workspace dir");
+        let db = workspace.join(".opencode/opencode.db");
+        let cwd = CwdGuard::change_to(&workspace);
+        let env = EnvDbGuard::pin(&db);
+        (tmp, workspace, db, cwd, env)
+    }
+
+    fn same_virtual_session(a: &Path, b: &Path) -> bool {
+        match (
+            OpenCode::parse_virtual_path(a),
+            OpenCode::parse_virtual_path(b),
+        ) {
+            (Some((db_a, sid_a)), Some((db_b, sid_b))) => {
+                if sid_a != sid_b {
+                    return false;
+                }
+                let ca = db_a.canonicalize().unwrap_or(db_a);
+                let cb = db_b.canonicalize().unwrap_or(db_b);
+                ca == cb
+            }
+            _ => a == b,
+        }
+    }
+
     fn sample_session(workspace: &Path) -> CanonicalSession {
         CanonicalSession {
             session_id: "source-session".to_string(),
@@ -971,7 +1729,11 @@ mod tests {
         assert_eq!(provider.cli_alias(), "opc");
         assert_eq!(
             <OpenCode as Provider>::resume_command(&provider, "sid"),
-            "opencode"
+            "opencode run -s ses_sid"
+        );
+        assert_eq!(
+            <OpenCode as Provider>::resume_command(&provider, "ses_already"),
+            "opencode run -s ses_already"
         );
     }
 
@@ -993,10 +1755,7 @@ mod tests {
     #[test]
     fn writer_reader_roundtrip_preserves_core_content() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let source = sample_session(&workspace);
         let written = OpenCode
@@ -1009,7 +1768,11 @@ mod tests {
             )
             .expect("write should succeed");
 
-        assert_eq!(written.resume_command, "opencode");
+        assert!(
+            written.resume_command.starts_with("opencode run -s ses_"),
+            "resume_command={}",
+            written.resume_command
+        );
         assert_eq!(written.paths.len(), 1);
         let db_path = written
             .paths
@@ -1029,9 +1792,8 @@ mod tests {
         assert_eq!(readback.messages[1].role, MessageRole::Assistant);
         assert_eq!(readback.messages[1].content, source.messages[1].content);
         assert_eq!(readback.workspace.as_deref(), Some(workspace.as_path()));
-        // The target id is now derived stably from the source session id so that
-        // re-conversion is idempotent and `--force` can overwrite in place.
-        assert_eq!(readback.session_id, source.session_id);
+        // Target id is source id with required `ses_` prefix.
+        assert_eq!(readback.session_id, format!("ses_{}", source.session_id));
     }
 
     /// Regression for #14: writing the same OpenCode session twice must fail
@@ -1041,10 +1803,7 @@ mod tests {
     #[test]
     fn write_twice_with_force_overwrites_in_place() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let source = sample_session(&workspace);
 
@@ -1071,9 +1830,10 @@ mod tests {
                 },
             )
             .expect_err("second write without --force should conflict");
+        let expected_id = format!("ses_{}", source.session_id);
         match conflict.downcast_ref::<crate::error::CasrError>() {
             Some(crate::error::CasrError::SessionConflict { session_id, .. }) => {
-                assert_eq!(session_id, &source.session_id);
+                assert_eq!(session_id, &expected_id);
             }
             other => panic!("expected SessionConflict, got {other:?}"),
         }
@@ -1091,7 +1851,7 @@ mod tests {
 
         // Same stable target id both times.
         assert_eq!(first.session_id, second.session_id);
-        assert_eq!(second.session_id, source.session_id);
+        assert_eq!(second.session_id, expected_id);
 
         // Exactly one session row and no orphaned/duplicated message rows.
         let conn = OpenCode::open_db(&db_path).expect("open db");
@@ -1119,10 +1879,7 @@ mod tests {
     #[test]
     fn owns_session_returns_virtual_path() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let source = sample_session(&workspace);
         let written = OpenCode
@@ -1135,17 +1892,25 @@ mod tests {
             )
             .expect("write should succeed");
         let found = OpenCode.owns_session(&written.session_id);
-
-        assert_eq!(found.as_deref(), Some(written.paths[0].as_path()));
+        assert!(found.is_some(), "owns_session should find written id");
+        // macOS tempdirs may surface as /var vs /private/var — compare via
+        // parse + db canonicalize (virtual path parent is a *file*).
+        assert!(
+            same_virtual_session(found.as_ref().unwrap(), &written.paths[0]),
+            "found={:?} written={:?}",
+            found,
+            written.paths[0]
+        );
+        assert!(
+            written.session_id.starts_with("ses_"),
+            "OpenCode target ids must use ses_ prefix"
+        );
     }
 
     #[test]
     fn read_session_from_db_path_returns_latest_root_session() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         // Distinct source ids so both land as separate root sessions in one DB
         // (target ids are now derived stably from the source session id).
@@ -1193,10 +1958,7 @@ mod tests {
     #[test]
     fn detect_reports_db_presence() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let source = sample_session(&workspace);
         OpenCode
@@ -1500,10 +2262,7 @@ mod tests {
     #[test]
     fn writer_no_title_generates_from_first_user_message() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let mut session = sample_session(&workspace);
         session.title = None;
@@ -1528,10 +2287,7 @@ mod tests {
     #[test]
     fn writer_no_timestamps_uses_current_time() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let mut session = sample_session(&workspace);
         session.started_at = None;
@@ -1558,10 +2314,7 @@ mod tests {
     #[test]
     fn writer_model_name_propagated_to_messages() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let session = sample_session(&workspace);
         let written = OpenCode
@@ -1584,10 +2337,7 @@ mod tests {
     #[test]
     fn reader_metadata_includes_token_counts() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let session = sample_session(&workspace);
         let written = OpenCode
@@ -1611,10 +2361,7 @@ mod tests {
     #[test]
     fn reader_message_extra_has_opencode_fields() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         let session = sample_session(&workspace);
         let written = OpenCode
@@ -1673,10 +2420,7 @@ mod tests {
     #[test]
     fn list_sessions_returns_all_sessions_from_db() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("workspace dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace();
 
         // Write two distinct sessions (distinct source ids → distinct rows)
         let mut first = sample_session(&workspace);
@@ -1728,18 +2472,28 @@ mod tests {
     #[test]
     fn list_sessions_empty_db_returns_empty_vec() {
         let _lock = OPENCODE_ENV.lock().expect("mutex lock");
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join(".opencode")).expect("data dir");
-        let _cwd = CwdGuard::change_to(&workspace);
+        let (_tmp, workspace, db_path, _cwd, _env) = test_workspace();
 
         // Create empty DB with schema
-        let db_path = workspace.join(".opencode/opencode.db");
         let conn = OpenCode::open_db_rw(&db_path).expect("create db");
         OpenCode::ensure_schema(&conn).expect("schema");
         drop(conn);
 
         let listed = OpenCode.list_sessions().expect("should return Some");
-        assert!(listed.is_empty(), "empty DB should have no sessions");
+        // Only the pinned env DB is visible; it has zero sessions.
+        let ours: Vec<_> = listed
+            .into_iter()
+            .filter(|(_, p)| {
+                p.parent()
+                    .and_then(|db| db.canonicalize().ok())
+                    .zip(db_path.canonicalize().ok())
+                    .is_some_and(|(a, b)| a == b)
+                    || p.to_string_lossy().contains("workspace")
+            })
+            .collect();
+        assert!(
+            ours.is_empty(),
+            "empty DB should have no sessions for workspace {workspace:?}"
+        );
     }
 }
