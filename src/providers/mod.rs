@@ -2,8 +2,8 @@
 //!
 //! Each supported provider (Claude Code, Codex, Gemini CLI, Antigravity CLI,
 //! Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory,
-//! OpenClaw, Pi-Agent, Kiro) implements the [`Provider`] trait to read/write
-//! sessions in its native format.
+//! OpenClaw, Pi-Agent, Kiro, Grok, Hermes, jcode) implements the [`Provider`]
+//! trait to read/write sessions in its native format.
 
 pub mod aider;
 pub mod amp;
@@ -16,6 +16,7 @@ pub mod codex;
 pub mod cursor;
 pub mod factory;
 pub mod gemini;
+pub mod grok;
 pub mod hermes;
 pub mod jcode;
 pub mod kiro;

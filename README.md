@@ -100,6 +100,9 @@ claude --resume <new-session-id>
 | OpenClaw | `ocl` | Yes | Yes | `openclaw --resume <session-id>` |
 | Pi-Agent | `pi`, `omp` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
 | Kiro CLI | `kr` | Yes | Yes | `kiro-cli --resume-id <session-id>` |
+| Grok Build (xAI) | `grk` | Yes | Yes | `grok --resume <session-id>` |
+| jcode | `jc` | Yes | Yes | `jcode --resume <session-id>` |
+| Hermes | `her` | Yes | Yes | `hermes --resume <session-id>` |
 
 Notes:
 - Initial core focus is Claude Code, Codex, and Gemini CLI.

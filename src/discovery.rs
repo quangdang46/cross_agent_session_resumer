@@ -117,6 +117,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::hermes::Hermes),
             Box::new(crate::providers::pi_agent::PiAgent),
             Box::new(crate::providers::kiro::Kiro),
+            Box::new(crate::providers::grok::Grok),
         ])
     }
 
@@ -460,6 +461,9 @@ fn canonical_provider_token(token: &str) -> &str {
         // Hermes.
         "hermes" => "hermes",
         "antigravity-cli" => "antigravity",
+        // Grok Build (xAI).
+        "xai" => "grok",
+        "grok-build" => "grok",
         _ => token,
     }
 }
@@ -532,6 +536,23 @@ impl ProviderRegistry {
                     {
                         return self.find_by_slug("claude-code");
                     }
+                    // Grok Build: ACP session/update stream or chat_history lines.
+                    if value.get("method").and_then(|v| v.as_str()) == Some("session/update")
+                        || value.get("method").and_then(|v| v.as_str())
+                            == Some("_x.ai/session/update")
+                    {
+                        return self.find_by_slug("grok");
+                    }
+                    if matches!(
+                        value.get("type").and_then(|v| v.as_str()),
+                        Some("user") | Some("assistant") | Some("tool_result") | Some("reasoning")
+                    ) && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n == "chat_history.jsonl" || n == "updates.jsonl")
+                    {
+                        return self.find_by_slug("grok");
+                    }
                     // ClawdBot: bare JSONL messages with role+content, no type field.
                     if value.get("role").is_some()
                         && value.get("content").is_some()
@@ -549,6 +570,15 @@ impl ProviderRegistry {
                 let file = std::fs::File::open(path).ok()?;
                 let reader = std::io::BufReader::new(file);
                 let value: serde_json::Value = serde_json::from_reader(reader).ok()?;
+
+                // Grok summary.json: info.id + info.cwd + chat_format_version.
+                if value.pointer("/info/id").is_some()
+                    && (value.get("chat_format_version").is_some()
+                        || value.get("grok_home").is_some()
+                        || value.get("num_chat_messages").is_some())
+                {
+                    return self.find_by_slug("grok");
+                }
 
                 if value.get("sessionId").is_some() && value.get("messages").is_some() {
                     return self.find_by_slug("gemini");
@@ -1075,8 +1105,8 @@ mod tests {
         found.dedup();
 
         let mut expected: Vec<String> = vec![
-            "cc", "cod", "gmi", "agy", "cur", "cln", "aid", "amp", "opc", "gpt", "cwb", "vib",
-            "fac", "ocl", "kr", "jc", "pi", "her",
+            "cc", "cod", "gmi", "agy", "cur", "cln", "aid", "amp", "opc", "gpt", "grk", "cwb",
+            "vib", "fac", "ocl", "kr", "jc", "pi", "her",
         ]
         .into_iter()
         .map(String::from)

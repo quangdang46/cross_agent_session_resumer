@@ -463,12 +463,14 @@ cross_agent_session_resumer/
   - `cod` -> Codex
   - `agy` -> Antigravity CLI (read/resume only; `agy --conversation <uuid> --model "Gemini 3.1 Pro (High)"`)
   - `gmi` -> Gemini CLI
+  - `grk` -> Grok Build (xAI; sessions under `~/.grok/sessions/<encoded-cwd>/<id>/`)
   - `omp` -> Pi Agent (oh-my-pi CLI; sessions under `~/.omp/agent/`, alias of `pi`)
 - Provider home overrides:
   - `CLAUDE_HOME`
   - `CODEX_HOME`
   - `GEMINI_HOME`
   - `OMP_HOME`, `PI_AGENT_HOME` (oh-my-pi / Pi Agent)
+  - `GROK_HOME` (Grok Build / xAI; default `~/.grok`)
 
 ### CLI Surface
 
