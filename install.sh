@@ -657,6 +657,18 @@ detect_platform() {
   fi
 }
 
+# Map rustc triple → release.yml suffix (casr-vX.Y.Z-<suffix>.tar.gz).
+release_suffix_for_target() {
+  case "$1" in
+    x86_64-unknown-linux-musl | x86_64-unknown-linux-gnu) echo "linux-x86_64" ;;
+    aarch64-unknown-linux-musl | aarch64-unknown-linux-gnu) echo "linux-aarch64" ;;
+    x86_64-apple-darwin) echo "macos-x86_64" ;;
+    aarch64-apple-darwin) echo "macos-aarch64" ;;
+    x86_64-pc-windows-msvc) echo "windows-x86_64" ;;
+    *) echo "" ;;
+  esac
+}
+
 set_artifact_url() {
   TAR=""
   URL=""
@@ -665,8 +677,17 @@ set_artifact_url() {
       TAR=$(basename "$ARTIFACT_URL")
       URL="$ARTIFACT_URL"
     elif [ -n "$TARGET" ]; then
-      TAR="casr-${TARGET}.tar.xz"
-      URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
+      # Primary: release.yml naming (casr-v0.3.0-macos-aarch64.tar.gz)
+      local suffix
+      suffix=$(release_suffix_for_target "$TARGET")
+      if [ -n "$suffix" ]; then
+        TAR="casr-${VERSION}-${suffix}.tar.gz"
+        URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
+      else
+        # Legacy fallback naming used by older dist workflows
+        TAR="casr-${TARGET}.tar.xz"
+        URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
+      fi
     else
       warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
       FROM_SOURCE=1
@@ -1265,19 +1286,25 @@ if [ -z "$INSTALL_SOURCE" ] && [ "$FROM_SOURCE" -eq 0 ] && [ -n "$URL" ]; then
   fi
 
   if [ "$DOWNLOAD_OK" -eq 0 ]; then
-    # Tier 2: unversioned latest
-    TIER2_URL="https://github.com/${OWNER}/${REPO}/releases/latest/download/casr-${TARGET}.tar.xz"
-    info "Trying unversioned latest: $TIER2_URL"
-    if curl -fsSL "${PROXY_ARGS[@]}" "$TIER2_URL" -o "$TMP/$TAR" 2>/dev/null; then
+    # Tier 2: same version, legacy rustc-triple tar.xz (older dist.yml)
+    TIER2_TAR="casr-${TARGET}.tar.xz"
+    TIER2_URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TIER2_TAR}"
+    info "Trying legacy triple naming: $TIER2_URL"
+    if curl -fsSL "${PROXY_ARGS[@]}" "$TIER2_URL" -o "$TMP/$TIER2_TAR" 2>/dev/null; then
+      TAR="$TIER2_TAR"
+      URL="$TIER2_URL"
       DOWNLOAD_OK=1
     fi
   fi
 
   if [ "$DOWNLOAD_OK" -eq 0 ]; then
-    # Tier 3: simple naming
-    TIER3_URL="https://github.com/${OWNER}/${REPO}/releases/latest/download/casr-${OS}-${ARCH}.tar.xz"
+    # Tier 3: simple OS-ARCH tar.xz (very old naming)
+    TIER3_TAR="casr-${OS}-${ARCH}.tar.xz"
+    TIER3_URL="https://github.com/${OWNER}/${REPO}/releases/latest/download/${TIER3_TAR}"
     info "Trying simple naming: $TIER3_URL"
-    if curl -fsSL "${PROXY_ARGS[@]}" "$TIER3_URL" -o "$TMP/$TAR" 2>/dev/null; then
+    if curl -fsSL "${PROXY_ARGS[@]}" "$TIER3_URL" -o "$TMP/$TIER3_TAR" 2>/dev/null; then
+      TAR="$TIER3_TAR"
+      URL="$TIER3_URL"
       DOWNLOAD_OK=1
     fi
   fi
