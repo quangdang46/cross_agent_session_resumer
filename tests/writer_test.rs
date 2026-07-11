@@ -516,11 +516,12 @@ fn writer_codex_output_valid_jsonl() {
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     let lines: Vec<&str> = content.lines().collect();
-    // session_meta + 4 messages (2 user event_msg + 2 assistant response_item)
+    // session_meta + dual user envelopes (response_item+event_msg)×2 + 2 assistant
+    // = 1 + 4 + 2 = 7
     assert_eq!(
         lines.len(),
-        5,
-        "Codex should write session_meta + 4 message lines"
+        7,
+        "Codex should write session_meta + dual user envelopes + assistants"
     );
     for (i, line) in lines.iter().enumerate() {
         if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
@@ -802,17 +803,25 @@ fn writer_codex_assistant_messages_are_response_item() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
 
-    let response_items: Vec<&serde_json::Value> = lines
+    let assistant_items: Vec<&serde_json::Value> = lines
         .iter()
-        .filter(|l| l["type"] == "response_item")
+        .filter(|l| l["type"] == "response_item" && l["payload"]["role"] == "assistant")
         .collect();
     assert_eq!(
-        response_items.len(),
+        assistant_items.len(),
         2,
-        "Codex should have 2 response_item lines"
+        "Codex should have 2 assistant response_item lines"
     );
-    assert_eq!(response_items[0]["payload"]["role"], "assistant");
-    assert_eq!(response_items[1]["payload"]["role"], "assistant");
+    // User turns also emit response_item envelopes for model context.
+    let user_items: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|l| l["type"] == "response_item" && l["payload"]["role"] == "user")
+        .collect();
+    assert_eq!(
+        user_items.len(),
+        2,
+        "Codex should have 2 user response_item lines"
+    );
 }
 
 #[test]
