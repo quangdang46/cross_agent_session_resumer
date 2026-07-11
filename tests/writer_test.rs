@@ -975,20 +975,14 @@ fn writer_codex_tool_calls_in_response_content() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
 
-    let response_items: Vec<&serde_json::Value> = lines
+    // Native Codex rollouts store tools as top-level function_call envelopes
+    // (not nested tool_use blocks). tool_call_session only attaches tool_calls.
+    let fn_call = lines
         .iter()
-        .filter(|l| l["type"] == "response_item")
-        .collect();
-
-    // First response_item should have tool_use in its content blocks.
-    let first_content = response_items[0]["payload"]["content"]
-        .as_array()
-        .expect("Codex response_item content should be array");
-    let has_tool_use = first_content.iter().any(|b| b["type"] == "tool_use");
-    assert!(
-        has_tool_use,
-        "Codex response_item should contain tool_use block"
-    );
+        .find(|l| l["type"] == "response_item" && l["payload"]["type"] == "function_call")
+        .expect("Codex rollout should contain a function_call response_item");
+    assert_eq!(fn_call["payload"]["name"], "Read");
+    assert_eq!(fn_call["payload"]["call_id"], "tc-1");
 }
 
 // ===========================================================================
@@ -1313,7 +1307,7 @@ fn writer_gemini_project_hash_matches_workspace() {
 // ===========================================================================
 
 #[test]
-fn writer_cc_default_workspace_uses_tmp() {
+fn writer_cc_default_workspace_uses_cwd_or_tmp() {
     let _lock = CC_ENV.lock().unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("CLAUDE_HOME", tmp.path());
@@ -1333,9 +1327,14 @@ fn writer_cc_default_workspace_uses_tmp() {
 
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     let first: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
-    assert_eq!(
-        first["cwd"], "/tmp",
-        "CC should fall back to /tmp when workspace is None"
+    // When workspace is unset: prefer process CWD (grounded), else `/tmp`.
+    let cwd = first["cwd"].as_str().expect("cwd field should be a string");
+    let process_cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok();
+    assert!(
+        process_cwd.as_deref() == Some(cwd) || cwd == "/tmp",
+        "CC should fall back to process CWD or /tmp when workspace is None, got {cwd}"
     );
 }
 

@@ -421,18 +421,16 @@ impl Provider for ClaudeCode {
         let now = chrono::Utc::now();
         let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-        // Determine the project directory key from the current working directory
-        // (where casr was invoked), falling back to the source session's own
-        // workspace when CWD is unavailable.  Using CWD ensures the converted
-        // session lands in the project directory matching the user's current
-        // worktree/context, so `claude --resume` can find it from the same CWD.
-        let cwd = std::env::current_dir();
-        let workspace_str = cwd.as_deref().unwrap_or_else(|_| {
-            session
-                .workspace
-                .as_deref()
-                .unwrap_or(std::path::Path::new("/tmp"))
-        });
+        // Prefer the source session workspace for placement + `cwd` fidelity
+        // (round-trip / list / info). Fall back to the process CWD when the
+        // source had no workspace, then `/tmp` as a last resort so writers
+        // never invent an ungrounded path.
+        let cwd = std::env::current_dir().ok();
+        let workspace_str = session
+            .workspace
+            .as_deref()
+            .or(cwd.as_deref())
+            .unwrap_or(std::path::Path::new("/tmp"));
         let dir_key = project_dir_key(workspace_str);
 
         let projects_dir = Self::projects_dir()
