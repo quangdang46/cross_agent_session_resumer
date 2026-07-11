@@ -769,29 +769,24 @@ fn register_thread_in_db(
 /// `msg_ts` is the event timestamp as an RFC3339 string, matching the
 /// top-level `timestamp` format current Codex readers expect.
 fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_json::Value> {
-    // User messages that carry tool payloads must be serialized as response_item
-    // envelopes; event_msg/user_message cannot represent tool_use/tool_result blocks.
-    let user_needs_response_item = msg.role == MessageRole::User
-        && (!msg.tool_calls.is_empty() || !msg.tool_results.is_empty());
-
+    // Native Codex rollouts store tools as *top-level* response_item envelopes
+    // (`payload.type = function_call` / `function_call_output`), not as
+    // tool_use/tool_result blocks nested inside a message content array.
     match msg.role {
-        MessageRole::User if !user_needs_response_item => vec![serde_json::json!({
-            "type": "event_msg",
-            "timestamp": msg_ts,
-            "payload": {
-                "type": "user_message",
-                "message": msg.content,
-            }
-        })],
-        MessageRole::User => vec![serde_json::json!({
-            "type": "response_item",
-            "timestamp": msg_ts,
-            "payload": {
-                "type": "message",
-                "role": codex_role_string(&msg.role),
-                "content": codex_response_content(msg),
-            }
-        })],
+        MessageRole::User
+            if msg.tool_calls.is_empty()
+                && msg.tool_results.is_empty()
+                && !msg.content.is_empty() =>
+        {
+            vec![serde_json::json!({
+                "type": "event_msg",
+                "timestamp": msg_ts,
+                "payload": {
+                    "type": "user_message",
+                    "message": msg.content,
+                }
+            })]
+        }
         MessageRole::Assistant if msg.author.as_deref() == Some("reasoning") => {
             vec![serde_json::json!({
                 "type": "event_msg",
@@ -802,19 +797,59 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_j
                 }
             })]
         }
-        MessageRole::Assistant
-        | MessageRole::Tool
-        | MessageRole::System
-        | MessageRole::Other(_) => {
-            let mut events = vec![serde_json::json!({
-                "type": "response_item",
-                "timestamp": msg_ts,
-                "payload": {
-                    "type": "message",
-                    "role": codex_role_string(&msg.role),
-                    "content": codex_response_content(msg),
-                }
-            })];
+        _ => {
+            let mut events: Vec<serde_json::Value> = Vec::new();
+
+            // Text-bearing turn (skip empty content when tools alone are present).
+            if !msg.content.is_empty()
+                || (msg.tool_calls.is_empty()
+                    && msg.tool_results.is_empty()
+                    && matches!(
+                        msg.role,
+                        MessageRole::Assistant | MessageRole::System | MessageRole::Other(_)
+                    ))
+            {
+                events.push(serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "message",
+                        "role": codex_role_string(&msg.role),
+                        "content": codex_text_content_blocks(msg),
+                    }
+                }));
+            }
+
+            for tc in &msg.tool_calls {
+                let call_id = tc.id.clone().unwrap_or_default();
+                let arguments = match &tc.arguments {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                events.push(serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "function_call",
+                        "role": "assistant",
+                        "call_id": call_id,
+                        "name": tc.name,
+                        "arguments": arguments,
+                    }
+                }));
+            }
+
+            for tr in &msg.tool_results {
+                events.push(serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": tr.call_id.clone().unwrap_or_default(),
+                        "output": tr.content,
+                    }
+                }));
+            }
 
             if let Some(info) = codex_token_count_info(&msg.extra) {
                 events.push(serde_json::json!({
@@ -827,9 +862,35 @@ fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: &str) -> Vec<serde_j
                 }));
             }
 
+            // Avoid emitting nothing for empty tool-less messages.
+            if events.is_empty() {
+                events.push(serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "message",
+                        "role": codex_role_string(&msg.role),
+                        "content": codex_text_content_blocks(msg),
+                    }
+                }));
+            }
+
             events
         }
     }
+}
+
+/// Text-only content blocks for a Codex message envelope (no nested tool blocks).
+fn codex_text_content_blocks(msg: &CanonicalMessage) -> serde_json::Value {
+    let text_type = if msg.role == MessageRole::Assistant {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    serde_json::json!([{
+        "type": text_type,
+        "text": msg.content,
+    }])
 }
 
 fn codex_role_string(role: &MessageRole) -> String {
@@ -840,53 +901,6 @@ fn codex_role_string(role: &MessageRole) -> String {
         MessageRole::System => "developer".to_string(),
         MessageRole::Other(other) => other.clone(),
     }
-}
-
-fn codex_response_content(msg: &CanonicalMessage) -> serde_json::Value {
-    let mut blocks: Vec<serde_json::Value> = Vec::new();
-
-    // Codex expects "output_text" for assistant-generated content blocks,
-    // "input_text" for user-supplied content blocks.
-    let text_type = if msg.role == MessageRole::Assistant {
-        "output_text"
-    } else {
-        "input_text"
-    };
-
-    if !msg.content.is_empty() {
-        blocks.push(serde_json::json!({
-            "type": text_type,
-            "text": msg.content,
-        }));
-    }
-
-    for tc in &msg.tool_calls {
-        blocks.push(serde_json::json!({
-            "type": "tool_use",
-            "id": tc.id.as_deref().unwrap_or(""),
-            "name": tc.name,
-            "input": tc.arguments,
-        }));
-    }
-
-    for tr in &msg.tool_results {
-        blocks.push(serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": tr.call_id.as_deref().unwrap_or(""),
-            "content": tr.content,
-            "is_error": tr.is_error,
-        }));
-    }
-
-    // Avoid empty response payloads in provider-native output.
-    if blocks.is_empty() {
-        blocks.push(serde_json::json!({
-            "type": text_type,
-            "text": msg.content,
-        }));
-    }
-
-    serde_json::Value::Array(blocks)
 }
 
 fn codex_token_count_info(extra: &serde_json::Value) -> Option<serde_json::Value> {
@@ -1628,24 +1642,27 @@ mod tests {
         };
 
         let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
-        assert_eq!(events.len(), 2);
+        // message + function_call + function_call_output + token_count
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0]["type"], "response_item");
         assert_eq!(events[0]["payload"]["type"], "message");
-        let content_blocks = events[0]["payload"]["content"]
-            .as_array()
-            .expect("response_item content should be array");
-        assert!(content_blocks.iter().any(|b| b["type"] == "tool_use"));
-        assert!(content_blocks.iter().any(|b| b["type"] == "tool_result"));
-
-        assert_eq!(events[1]["type"], "event_msg");
-        assert_eq!(events[1]["payload"]["type"], "token_count");
-        assert_eq!(events[1]["payload"]["info"]["input_tokens"], 11);
-        assert_eq!(events[1]["payload"]["info"]["output_tokens"], 22);
-        assert_eq!(events[1]["payload"]["info"]["total_tokens"], 33);
+        assert_eq!(events[1]["type"], "response_item");
+        assert_eq!(events[1]["payload"]["type"], "function_call");
+        assert_eq!(events[1]["payload"]["name"], "apply_patch");
+        assert_eq!(events[1]["payload"]["call_id"], "call-1");
+        assert_eq!(events[2]["type"], "response_item");
+        assert_eq!(events[2]["payload"]["type"], "function_call_output");
+        assert_eq!(events[2]["payload"]["call_id"], "call-1");
+        assert_eq!(events[2]["payload"]["output"], "ok");
+        assert_eq!(events[3]["type"], "event_msg");
+        assert_eq!(events[3]["payload"]["type"], "token_count");
+        assert_eq!(events[3]["payload"]["info"]["input_tokens"], 11);
+        assert_eq!(events[3]["payload"]["info"]["output_tokens"], 22);
+        assert_eq!(events[3]["payload"]["info"]["total_tokens"], 33);
     }
 
     #[test]
-    fn user_message_with_tool_payload_is_serialized_as_response_item() {
+    fn user_message_with_tool_payload_is_serialized_as_function_envelopes() {
         let msg = CanonicalMessage {
             idx: 0,
             role: MessageRole::User,
@@ -1666,15 +1683,13 @@ mod tests {
         };
 
         let events = codex_events_for_message(&msg, "2026-02-09T06:07:08.000Z");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["type"], "response_item");
-        assert_eq!(events[0]["payload"]["type"], "message");
-        assert_eq!(events[0]["payload"]["role"], "user");
-        let blocks = events[0]["payload"]["content"]
-            .as_array()
-            .expect("response_item content should be array");
-        assert!(blocks.iter().any(|b| b["type"] == "tool_use"));
-        assert!(blocks.iter().any(|b| b["type"] == "tool_result"));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["payload"]["type"], "function_call");
+        assert_eq!(events[0]["payload"]["call_id"], "call-7");
+        assert_eq!(events[0]["payload"]["name"], "Read");
+        assert_eq!(events[1]["payload"]["type"], "function_call_output");
+        assert_eq!(events[1]["payload"]["call_id"], "call-7");
+        assert_eq!(events[1]["payload"]["output"], "fn main() {}");
     }
 
     #[test]
