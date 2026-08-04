@@ -421,16 +421,11 @@ impl Provider for ClaudeCode {
         let now = chrono::Utc::now();
         let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-        // Prefer process CWD for placement + `cwd` so `claude --resume` finds
-        // the converted session from the directory where casr was invoked.
-        // Fall back to the source session workspace when CWD is unavailable,
-        // then `/tmp`.
-        let cwd = std::env::current_dir();
-        let workspace_str = cwd
-            .as_deref()
-            .ok()
-            .or(session.workspace.as_deref())
-            .unwrap_or(std::path::Path::new("/tmp"));
+        // Determine the project directory key from workspace. When the session
+        // recorded none, fall back to the invoking cwd (never /tmp): Claude Code
+        // resolves `--resume` by matching the current cwd against this bucket.
+        let workspace_buf = crate::model::effective_workspace(session);
+        let workspace_str = workspace_buf.as_path();
         let dir_key = project_dir_key(workspace_str);
 
         let projects_dir = Self::projects_dir()
