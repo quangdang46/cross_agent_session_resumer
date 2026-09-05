@@ -260,6 +260,25 @@ impl PiEngine {
         })
     }
 
+    /// Extract the session id from the `session` header line within the first
+    /// entries, if present. Used to resolve named sessions (`pi -n foo`) whose
+    /// filename does not embed the id.
+    fn header_session_id(buf: &[u8]) -> Option<String> {
+        const SCAN_BYTES: usize = 8192;
+        const SCAN_LINES: usize = 8;
+        let max = buf.len().min(SCAN_BYTES);
+        let block = std::str::from_utf8(&buf[..max]).unwrap_or("");
+        for line in block.lines().take(SCAN_LINES) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v.get("type").and_then(|t| t.as_str()) == Some("session") {
+                return v.get("id").and_then(|i| i.as_str()).map(String::from);
+            }
+        }
+        None
+    }
+
     fn detect(&self) -> DetectionResult {
         let home = self.home_dir();
         let installed = home.join("sessions").is_dir();
@@ -297,9 +316,13 @@ impl PiEngine {
         if !sessions.is_dir() {
             return None;
         }
-        // Walk to find a JSONL file whose stem ends with `_<session_id>`.
-        // Pi/omp files follow the pattern `<timestamp>_<uuid>.jsonl`, so the
-        // stem contains the session_id as the suffix after `_`.
+        // Two filename layouts exist:
+        // 1. Default: `<timestamp>_<session-id>.jsonl` — the id is embedded in
+        //    the filename stem (fast path: match by name, verify content).
+        // 2. Named sessions (`pi -n foo` / `omp --name foo`): `<name>.jsonl`
+        //    inside the session directory, where the id lives ONLY in the
+        //    session header line. These have no underscore, so the header id
+        //    must confirm the match.
         let lookup_underscore = format!("_{session_id}");
         for entry in walkdir::WalkDir::new(&sessions)
             .into_iter()
@@ -309,51 +332,66 @@ impl PiEngine {
                 continue;
             }
             let name = entry.file_name().to_str().unwrap_or("");
-            // Pi-Agent files must be JSONL with an underscore.
-            if !name.ends_with(".jsonl") || !name.contains('_') {
+            if !name.ends_with(".jsonl") {
                 continue;
             }
-            if entry
+            let stem = entry
                 .path()
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .is_some_and(|s| s == session_id || s.ends_with(&lookup_underscore))
+                .unwrap_or("");
+            let stem_match = stem == session_id || stem.ends_with(&lookup_underscore);
+            let named_file = !stem.contains('_');
+            // Embedded-id files that don't name this session can never match;
+            // skip before touching their content.
+            if !stem_match && !named_file {
+                continue;
+            }
+            let buf = match std::fs::read(entry.path())
+                .or_else(|_| std::fs::read_to_string(entry.path()).map(String::into_bytes))
             {
-                // Verify this is actually a pi-agent/omp session by scanning
-                // the first entries for a known type discriminator. Recent
-                // pi/omp versions prepend `{"type":"title",...}` and other
-                // metadata lines before the `session` header, so the very
-                // first line is not necessarily the header. Claude Code and
-                // other providers also write JSONL but their entries have
-                // type "user"/"assistant"/... which never matches here.
-                match std::fs::read(entry.path())
-                    .or_else(|_| std::fs::read_to_string(entry.path()).map(String::into_bytes))
-                {
-                    Ok(buf) => {
-                        if !Self::content_looks_like_pi_session(&buf) {
-                            trace!(
-                                provider = self.flavor.slug(),
-                                path = %entry.path().display(),
-                                "filename matches but content is not a pi-agent session — skipping"
-                            );
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        trace!(
-                            provider = self.flavor.slug(),
-                            path = %entry.path().display(),
-                            error = %e,
-                            "filename matches but could not read file — skipping"
-                        );
-                        continue;
-                    }
+                Ok(buf) => buf,
+                Err(e) => {
+                    trace!(
+                        provider = self.flavor.slug(),
+                        path = %entry.path().display(),
+                        error = %e,
+                        "could not read candidate file — skipping"
+                    );
+                    continue;
                 }
+            };
+            // Verify this is actually a pi-agent/omp session by scanning the
+            // first entries for a known type discriminator. Recent pi/omp
+            // versions prepend `{"type":"title",...}` and other metadata lines
+            // before the `session` header, so the very first line is not
+            // necessarily the header. Claude Code and other providers also
+            // write JSONL but their entries have type "user"/"assistant"/...
+            // which never matches here.
+            if !Self::content_looks_like_pi_session(&buf) {
+                trace!(
+                    provider = self.flavor.slug(),
+                    path = %entry.path().display(),
+                    "candidate content is not a pi-agent session — skipping"
+                );
+                continue;
+            }
+            if stem_match {
                 debug!(
                     provider = self.flavor.slug(),
                     path = %entry.path().display(),
                     session_id,
-                    "owns session"
+                    "owns session (filename match)"
+                );
+                return Some(entry.path().to_path_buf());
+            }
+            // Named file: the session header id is authoritative.
+            if Self::header_session_id(&buf).as_deref() == Some(session_id) {
+                debug!(
+                    provider = self.flavor.slug(),
+                    path = %entry.path().display(),
+                    session_id,
+                    "owns session (named session, header id match)"
                 );
                 return Some(entry.path().to_path_buf());
             }
@@ -1626,6 +1664,25 @@ mod tests {
         assert!(!PiEngine::content_looks_like_pi_session(
             b"{\"type\":\"title\",\"pad\":\"x\"}\n"
         ));
+    }
+
+    #[test]
+    fn header_session_id_reads_id_from_session_line() {
+        let buf = br#"{"type":"title","v":1,"title":"IssueScout"}
+{"type":"session","version":3,"id":"01a06d70-30f6","timestamp":"2026-09-04T15:33:24.788Z","cwd":"/tmp"}
+"#;
+        assert_eq!(
+            PiEngine::header_session_id(buf).as_deref(),
+            Some("01a06d70-30f6")
+        );
+    }
+
+    #[test]
+    fn header_session_id_returns_none_without_session_header() {
+        let buf = br#"{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}
+"#;
+        assert_eq!(PiEngine::header_session_id(buf), None);
+        assert_eq!(PiEngine::header_session_id(b""), None);
     }
 
     #[test]
