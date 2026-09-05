@@ -98,7 +98,8 @@ claude --resume <new-session-id>
 | Vibe | `vib` | Yes | Yes | `vibe --resume <session-id>` |
 | Factory | `fac` | Yes | Yes | `factory --resume <session-id>` |
 | OpenClaw | `ocl` | Yes | Yes | `openclaw --resume <session-id>` |
-| Pi-Agent | `pi`, `omp` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
+| Pi-Agent | `pi` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
+| OMP (oh-my-pi) | `omp` | Yes | Yes | `omp --session <path-to-session.jsonl>` |
 | Kiro CLI | `kr` | Yes | Yes | `kiro-cli --resume-id <session-id>` |
 | Grok Build (xAI) | `grk` | Yes | Yes | `grok --resume <session-id>` |
 | jcode | `jc` | Yes | Yes | `jcode --resume <session-id>` |
@@ -287,7 +288,8 @@ export CLINE_HOME="$HOME/.config/Code/User/globalStorage/saoudrizwan.claude-dev"
 export AIDER_HOME="$HOME/.aider"
 export AMP_HOME="$HOME/.local/share/amp"
 export OPENCODE_HOME="$HOME/.opencode"
-export OMP_HOME="$HOME/.omp/agent"          # Pi-Agent / oh-my-pi
+export OMP_HOME="$HOME/.omp/agent"          # OMP (oh-my-pi)
+export PI_AGENT_HOME="$HOME/.pi/agent"      # Pi-Agent
 
 # Logging verbosity (alternative to --verbose / --trace)
 export RUST_LOG="casr=debug"
@@ -538,9 +540,13 @@ Recommended test set for new providers:
 
 ## Provider Format Notes
 
-### Pi-Agent / omp
-- The same provider supports Pi-Agent (`~/.pi/agent/sessions/`) and oh-my-pi / omp (`~/.omp/agent/sessions/`).
-- Alias `omp` is treated as an alias of `pi-agent`. Set `$OMP_HOME` (or `$PI_AGENT_HOME`) to override.
+### Pi-Agent
+- Sessions under `~/.pi/agent/sessions/`; override with `$PI_AGENT_HOME`.
+
+### OMP (oh-my-pi)
+- oh-my-pi is a fork of Pi Agent with an identical session format but a separate home.
+- Sessions under `~/.omp/agent/sessions/`; override with `$OMP_HOME`.
+- Separate provider from Pi-Agent (`pi`), so both session stores stay visible; use `--source pi` / `--source omp` to disambiguate.
 - JSONL with typed entries: `session`, `message`, `model_change`, `thinking_level_change`.
 
 ### Claude Code

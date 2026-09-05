@@ -39,6 +39,7 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("FACTORY_HOME", tmp.path().join("factory"))
         .env("OPENCLAW_HOME", tmp.path().join("openclaw"))
         .env("PI_AGENT_HOME", tmp.path().join("pi-agent"))
+        .env("OMP_HOME", tmp.path().join("omp"))
         .env("KIRO_HOME", tmp.path().join("kiro"))
         .env("JCODE_HOME", tmp.path().join("jcode"))
         .env("XDG_CONFIG_HOME", tmp.path().join("xdg-config"))

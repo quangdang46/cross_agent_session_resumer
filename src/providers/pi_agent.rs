@@ -1,11 +1,16 @@
-//! Pi-Agent provider — reads/writes JSONL sessions with typed entries and content blocks.
+//! Pi JSONL format providers — Pi-Agent (`pi`) and OMP (oh-my-pi, `omp`).
 //!
-//! Session files: `~/.pi/agent/sessions/<safe-path>/<timestamp>_<uuid>.jsonl`
-//! or, when using the `omp` (oh-my-pi) CLI binary, `~/.omp/agent/sessions/...`.
-//! Override root: `OMP_HOME` first, then `PI_AGENT_HOME`.
+//! Both CLIs store sessions as JSONL with typed entries and content blocks:
+//! - Pi-Agent: `~/.pi/agent/sessions/<safe-path>/<timestamp>_<uuid>.jsonl`
+//!   (override: `$PI_AGENT_HOME`)
+//! - OMP (oh-my-pi, a fork of Pi Agent): `~/.omp/agent/sessions/...`
+//!   (override: `$OMP_HOME`)
 //!
-//! The same provider is exposed under two CLI aliases: `pi` and `omp`. Both
-//! resolve to the same reader/writer; only the on-disk home directory differs.
+//! The two formats are identical, but each CLI owns a separate home
+//! directory, so casr exposes them as two independent providers sharing the
+//! read/write engine in this module. This keeps both session stores visible
+//! at all times (a single shared provider would hide whichever home lost the
+//! precedence race) and lets `--source pi` / `--source omp` disambiguate.
 //!
 //! ## JSONL format
 //!
@@ -43,66 +48,117 @@ use crate::model::{
 };
 use crate::providers::{Provider, WriteOptions, WrittenSession};
 
-/// Pi-Agent provider implementation.
+/// Which CLI flavor of the shared Pi JSONL format a provider targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiFlavor {
+    /// Original Pi Agent (`pi` binary).
+    Pi,
+    /// oh-my-pi fork (`omp` binary).
+    Omp,
+}
+
+impl PiFlavor {
+    /// Provider slug used in session metadata and `providers --json`.
+    fn slug(self) -> &'static str {
+        match self {
+            PiFlavor::Pi => "pi-agent",
+            PiFlavor::Omp => "omp",
+        }
+    }
+
+    /// Human-readable provider name.
+    fn display_name(self) -> &'static str {
+        match self {
+            PiFlavor::Pi => "Pi-Agent",
+            PiFlavor::Omp => "OMP (oh-my-pi)",
+        }
+    }
+
+    /// CLI alias for `casr <alias> resume …`.
+    fn cli_alias(self) -> &'static str {
+        match self {
+            PiFlavor::Pi => "pi",
+            PiFlavor::Omp => "omp",
+        }
+    }
+
+    /// Environment variable overriding this flavor's home directory.
+    fn home_env_var(self) -> &'static str {
+        match self {
+            PiFlavor::Pi => "PI_AGENT_HOME",
+            PiFlavor::Omp => "OMP_HOME",
+        }
+    }
+
+    /// Default home directory when the env override is unset.
+    fn default_home(self) -> PathBuf {
+        let home = dirs::home_dir().unwrap_or_default();
+        match self {
+            PiFlavor::Pi => home.join(".pi").join("agent"),
+            PiFlavor::Omp => home.join(".omp").join("agent"),
+        }
+    }
+
+    /// Binary invoked by the resume command.
+    fn resume_binary(self) -> &'static str {
+        match self {
+            PiFlavor::Pi => "pi",
+            PiFlavor::Omp => "omp",
+        }
+    }
+
+    /// `metadata.source` tag recorded when reading a session file.
+    fn source_tag(self) -> &'static str {
+        match self {
+            PiFlavor::Pi => "pi_agent",
+            PiFlavor::Omp => "omp",
+        }
+    }
+}
+
+/// Pi-Agent provider — original `pi` CLI storing sessions under `~/.pi/agent`.
 pub struct PiAgent;
 
-impl PiAgent {
-    /// Root directory for Pi-Agent session storage.
+/// OMP provider — oh-my-pi `omp` CLI storing sessions under `~/.omp/agent`.
+pub struct Omp;
+
+/// Shared read/write engine for both Pi JSONL flavors.
+struct PiEngine {
+    flavor: PiFlavor,
+}
+
+impl PiEngine {
+    fn new(flavor: PiFlavor) -> Self {
+        Self { flavor }
+    }
+
+    /// Root directory for this flavor's session storage.
     ///
     /// Resolution precedence:
-    /// 1. `$OMP_HOME` (oh-my-pi CLI)
-    /// 2. `$PI_AGENT_HOME` (legacy override)
-    /// 3. `~/.omp/agent` (default for the `omp` binary)
-    /// 4. `~/.pi/agent` (default for the original Pi Agent)
+    /// 1. The flavor's env override (`$PI_AGENT_HOME` / `$OMP_HOME`)
+    /// 2. The flavor's own default (`~/.pi/agent` / `~/.omp/agent`)
     ///
-    /// The first path that *exists* wins when the env vars are unset, so
-    /// machines with both layouts installed pick the live one.
-    ///
-    /// `env_override` is used for testing; pass `None` in production.
-    fn home_dir() -> PathBuf {
+    /// An env var pointing at a non-existent path is still returned so that
+    /// `detect()` can correctly report `installed=false` (the `sessions/`
+    /// subdir won't exist either) and `write_session` can create the
+    /// directory tree. The critical guard is in [`Self::sessions_dir`]: it
+    /// checks `sessions.is_dir()` and falls back to the home dir, NOT to
+    /// other providers' roots. This prevents the env-var leak that was the
+    /// actual bug — previously, when an env var pointed to a non-existent
+    /// dir, the method fell through to the other flavor's home and
+    /// discovered live session files there that belonged to unrelated
+    /// session IDs.
+    fn home_dir(&self) -> PathBuf {
         Self::home_dir_impl(
-            std::env::var("OMP_HOME").ok(),
-            std::env::var("PI_AGENT_HOME").ok(),
+            std::env::var(self.flavor.home_env_var()).ok(),
+            self.flavor.default_home(),
         )
     }
 
     /// Inner implementation factored out for testability without env-var
     /// manipulation (which is `unsafe` on Rust 2024 nightly).
-    ///
-    /// When `OMP_HOME` or `PI_AGENT_HOME` is set but the path does not
-    /// exist, we still return the targeted path so that `detect()` can
-    /// correctly report `installed=false` (the `sessions/` subdir won't
-    /// exist either) and `write_session` can create the directory tree.
-    /// The critical guard is in `sessions_dir`: it checks `sessions.is_dir()`
-    /// and falls back to the home dir, NOT to other providers' roots.
-    /// This prevents the env-var leak that was the actual bug — previously,
-    /// when an env var pointed to a non-existent dir, the method fell
-    /// through to `~/.omp/agent/` and discovered live session files there
-    /// that belonged to unrelated session IDs.
-    fn home_dir_impl(omp_home_env: Option<String>, pi_home_env: Option<String>) -> PathBuf {
-        if let Some(ref home) = omp_home_env {
-            let p = PathBuf::from(home);
-            if p.exists() {
-                return p;
-            }
-            // Env var is set but path does not exist — still use it as the
-            // target path so the writer can create it. Ownership checks will
-            // short-circuit via sessions_dir.is_dir().
-            return p;
-        }
-        if let Some(ref home) = pi_home_env {
-            let p = PathBuf::from(home);
-            if p.exists() {
-                return p;
-            }
-            return p;
-        }
-        let default_home = dirs::home_dir().unwrap_or_default();
-        let omp_home = default_home.join(".omp").join("agent");
-        if omp_home.exists() {
-            return omp_home;
-        }
-        default_home.join(".pi").join("agent")
+    fn home_dir_impl(env_value: Option<String>, default: PathBuf) -> PathBuf {
+        env_value.map(PathBuf::from).unwrap_or(default)
     }
 
     /// Sessions directory under the home dir.
@@ -178,30 +234,46 @@ impl PiAgent {
             })
             .collect()
     }
-}
 
-impl Provider for PiAgent {
-    fn name(&self) -> &str {
-        "Pi-Agent"
-    }
-
-    fn slug(&self) -> &str {
-        "pi-agent"
-    }
-
-    fn cli_alias(&self) -> &str {
-        "pi"
+    /// Check whether a candidate file's content is a pi-agent/omp session.
+    ///
+    /// Scans the first JSONL entries (bounded read) for a known type
+    /// discriminator — the `session` header or a `message` entry. Recent
+    /// pi/omp versions prepend `{"type":"title",...}` metadata lines before
+    /// the session header, so the very first line is not necessarily the
+    /// header. Entries from other JSONL providers (e.g. Claude Code's
+    /// `"user"`/`"assistant"` lines) never match.
+    fn content_looks_like_pi_session(buf: &[u8]) -> bool {
+        const SCAN_BYTES: usize = 8192;
+        const SCAN_LINES: usize = 8;
+        let max = buf.len().min(SCAN_BYTES);
+        let block = std::str::from_utf8(&buf[..max]).unwrap_or("");
+        block.lines().take(SCAN_LINES).any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "session" || t == "message")
+                })
+                .unwrap_or(false)
+        })
     }
 
     fn detect(&self) -> DetectionResult {
-        let home = Self::home_dir();
+        let home = self.home_dir();
         let installed = home.join("sessions").is_dir();
         let evidence = if installed {
             vec![format!("sessions directory found: {}", home.display())]
         } else {
             vec![]
         };
-        trace!(provider = "pi-agent", ?evidence, installed, "detection");
+        trace!(
+            provider = self.flavor.slug(),
+            ?evidence,
+            installed,
+            "detection"
+        );
         DetectionResult {
             installed,
             version: None,
@@ -210,7 +282,7 @@ impl Provider for PiAgent {
     }
 
     fn session_roots(&self) -> Vec<PathBuf> {
-        let home = Self::home_dir();
+        let home = self.home_dir();
         let sessions = home.join("sessions");
         if sessions.is_dir() {
             vec![sessions]
@@ -220,14 +292,14 @@ impl Provider for PiAgent {
     }
 
     fn owns_session(&self, session_id: &str) -> Option<PathBuf> {
-        let home = Self::home_dir();
+        let home = self.home_dir();
         let sessions = Self::sessions_dir(&home);
         if !sessions.is_dir() {
             return None;
         }
         // Walk to find a JSONL file whose stem ends with `_<session_id>`.
-        // omp files follow the pattern `<timestamp>_<uuid>.jsonl`, so the stem
-        // contains the session_id as the suffix after `_`.
+        // Pi/omp files follow the pattern `<timestamp>_<uuid>.jsonl`, so the
+        // stem contains the session_id as the suffix after `_`.
         let lookup_underscore = format!("_{session_id}");
         for entry in walkdir::WalkDir::new(&sessions)
             .into_iter()
@@ -247,50 +319,29 @@ impl Provider for PiAgent {
                 .and_then(|s| s.to_str())
                 .is_some_and(|s| s == session_id || s.ends_with(&lookup_underscore))
             {
-                // Verify this is actually a pi-agent/omp session by checking
-                // the file's first line has type "session" (the header line)
-                // or "message" (in case the session header was already
-                // consumed). Claude Code and other providers also write JSONL
-                // but their first line has type "user" or similar — pi-agent
-                // always starts with type "session".
+                // Verify this is actually a pi-agent/omp session by scanning
+                // the first entries for a known type discriminator. Recent
+                // pi/omp versions prepend `{"type":"title",...}` and other
+                // metadata lines before the `session` header, so the very
+                // first line is not necessarily the header. Claude Code and
+                // other providers also write JSONL but their entries have
+                // type "user"/"assistant"/... which never matches here.
                 match std::fs::read(entry.path())
                     .or_else(|_| std::fs::read_to_string(entry.path()).map(String::into_bytes))
                 {
                     Ok(buf) => {
-                        let max = buf.len().min(1024);
-                        let first_block = std::str::from_utf8(&buf[..max]).unwrap_or("");
-                        let first_line = first_block.lines().next().unwrap_or("");
-                        match serde_json::from_str::<serde_json::Value>(first_line) {
-                            Ok(prelude) => {
-                                let is_pi_agent = prelude
-                                    .get("type")
-                                    .and_then(|t| t.as_str())
-                                    .map(|t| t == "session" || t == "message")
-                                    .unwrap_or(false);
-                                if !is_pi_agent {
-                                    trace!(
-                                        provider = "pi-agent",
-                                        path = %entry.path().display(),
-                                        first_type = ?prelude.get("type"),
-                                        "filename matches but content is not a pi-agent session — skipping"
-                                    );
-                                    continue;
-                                }
-                            }
-                            Err(e) => {
-                                trace!(
-                                    provider = "pi-agent",
-                                    path = %entry.path().display(),
-                                    error = %e,
-                                    "filename matches but first line is not valid JSON — skipping"
-                                );
-                                continue;
-                            }
+                        if !Self::content_looks_like_pi_session(&buf) {
+                            trace!(
+                                provider = self.flavor.slug(),
+                                path = %entry.path().display(),
+                                "filename matches but content is not a pi-agent session — skipping"
+                            );
+                            continue;
                         }
                     }
                     Err(e) => {
                         trace!(
-                            provider = "pi-agent",
+                            provider = self.flavor.slug(),
                             path = %entry.path().display(),
                             error = %e,
                             "filename matches but could not read file — skipping"
@@ -299,7 +350,7 @@ impl Provider for PiAgent {
                     }
                 }
                 debug!(
-                    provider = "pi-agent",
+                    provider = self.flavor.slug(),
                     path = %entry.path().display(),
                     session_id,
                     "owns session"
@@ -311,7 +362,7 @@ impl Provider for PiAgent {
     }
 
     fn read_session(&self, path: &Path) -> anyhow::Result<CanonicalSession> {
-        debug!(path = %path.display(), "reading Pi-Agent session");
+        debug!(path = %path.display(), "reading {} session", self.flavor.display_name());
 
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", path.display()))?;
@@ -487,7 +538,7 @@ impl Provider for PiAgent {
         let workspace = session_cwd.as_ref().map(PathBuf::from);
 
         let metadata = serde_json::json!({
-            "source": "pi_agent",
+            "source": self.flavor.source_tag(),
             "session_id": session_id,
             "provider": provider_name,
             "model_id": model_id,
@@ -496,12 +547,13 @@ impl Provider for PiAgent {
         info!(
             session_id,
             messages = messages.len(),
-            "Pi-Agent session parsed"
+            "{} session parsed",
+            self.flavor.display_name()
         );
 
         Ok(CanonicalSession {
             session_id,
-            provider_slug: "pi-agent".to_string(),
+            provider_slug: self.flavor.slug().to_string(),
             workspace,
             title,
             started_at,
@@ -535,7 +587,7 @@ impl Provider for PiAgent {
             format!("{}_{}", now.format("%Y-%m-%dT%H-%M-%S"), session.session_id)
         };
 
-        let home = Self::home_dir();
+        let home = self.home_dir();
         let sessions_dir = home.join("sessions");
         let target_path = sessions_dir.join(format!("{session_id}.jsonl"));
 
@@ -543,7 +595,8 @@ impl Provider for PiAgent {
             session_id,
             path = %target_path.display(),
             messages = session.messages.len(),
-            "writing Pi-Agent session"
+            "writing {} session",
+            self.flavor.display_name()
         );
 
         let mut lines: Vec<String> = Vec::new();
@@ -701,14 +754,15 @@ impl Provider for PiAgent {
             &target_path,
             file_content.as_bytes(),
             opts.force,
-            self.slug(),
+            self.flavor.slug(),
         )?;
 
         info!(
             session_id,
             path = %outcome.target_path.display(),
             messages = session.messages.len(),
-            "Pi-Agent session written"
+            "{} session written",
+            self.flavor.display_name()
         );
 
         Ok(WrittenSession {
@@ -721,10 +775,98 @@ impl Provider for PiAgent {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        let home = Self::home_dir();
+        let home = self.home_dir();
         let sessions_dir = home.join("sessions");
         let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
-        format!("pi --session {}", session_path.display())
+        format!(
+            "{} --session {}",
+            self.flavor.resume_binary(),
+            session_path.display()
+        )
+    }
+}
+
+impl Provider for PiAgent {
+    fn name(&self) -> &str {
+        PiFlavor::Pi.display_name()
+    }
+
+    fn slug(&self) -> &str {
+        PiFlavor::Pi.slug()
+    }
+
+    fn cli_alias(&self) -> &str {
+        PiFlavor::Pi.cli_alias()
+    }
+
+    fn detect(&self) -> DetectionResult {
+        PiEngine::new(PiFlavor::Pi).detect()
+    }
+
+    fn session_roots(&self) -> Vec<PathBuf> {
+        PiEngine::new(PiFlavor::Pi).session_roots()
+    }
+
+    fn owns_session(&self, session_id: &str) -> Option<PathBuf> {
+        PiEngine::new(PiFlavor::Pi).owns_session(session_id)
+    }
+
+    fn read_session(&self, path: &Path) -> anyhow::Result<CanonicalSession> {
+        PiEngine::new(PiFlavor::Pi).read_session(path)
+    }
+
+    fn write_session(
+        &self,
+        session: &CanonicalSession,
+        opts: &WriteOptions,
+    ) -> anyhow::Result<WrittenSession> {
+        PiEngine::new(PiFlavor::Pi).write_session(session, opts)
+    }
+
+    fn resume_command(&self, session_id: &str) -> String {
+        PiEngine::new(PiFlavor::Pi).resume_command(session_id)
+    }
+}
+
+impl Provider for Omp {
+    fn name(&self) -> &str {
+        PiFlavor::Omp.display_name()
+    }
+
+    fn slug(&self) -> &str {
+        PiFlavor::Omp.slug()
+    }
+
+    fn cli_alias(&self) -> &str {
+        PiFlavor::Omp.cli_alias()
+    }
+
+    fn detect(&self) -> DetectionResult {
+        PiEngine::new(PiFlavor::Omp).detect()
+    }
+
+    fn session_roots(&self) -> Vec<PathBuf> {
+        PiEngine::new(PiFlavor::Omp).session_roots()
+    }
+
+    fn owns_session(&self, session_id: &str) -> Option<PathBuf> {
+        PiEngine::new(PiFlavor::Omp).owns_session(session_id)
+    }
+
+    fn read_session(&self, path: &Path) -> anyhow::Result<CanonicalSession> {
+        PiEngine::new(PiFlavor::Omp).read_session(path)
+    }
+
+    fn write_session(
+        &self,
+        session: &CanonicalSession,
+        opts: &WriteOptions,
+    ) -> anyhow::Result<WrittenSession> {
+        PiEngine::new(PiFlavor::Omp).write_session(session, opts)
+    }
+
+    fn resume_command(&self, session_id: &str) -> String {
+        PiEngine::new(PiFlavor::Omp).resume_command(session_id)
     }
 }
 
@@ -747,6 +889,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_jsonl(tmp.path(), "2025-12-01T10-00-00_uuid1.jsonl", lines);
         let provider = PiAgent;
+        provider.read_session(&path).expect("read_session failed")
+    }
+
+    fn read_omp(lines: &[&str]) -> CanonicalSession {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_jsonl(tmp.path(), "2025-12-01T10-00-00_uuid1.jsonl", lines);
+        let provider = Omp;
         provider.read_session(&path).expect("read_session failed")
     }
 
@@ -926,6 +1075,21 @@ mod tests {
     }
 
     #[test]
+    fn reader_model_change_accepts_model_field_for_omp() {
+        // omp emits "model" (not "modelId") in model_change events.
+        let session = read_omp(&[
+            r#"{"type":"session","id":"s1","provider":"openai","modelId":"gpt-4"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello"}}"#,
+            r#"{"type":"model_change","provider":"anthropic","model":"claude-3-opus"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":"Hello!"}}"#,
+        ]);
+        assert_eq!(
+            session.messages[1].author,
+            Some("claude-3-opus".to_string())
+        );
+    }
+
+    #[test]
     fn reader_skips_thinking_level_change() {
         let session = read_piagent(&[
             r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
@@ -1035,6 +1199,15 @@ mod tests {
             r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"test"}}"#,
         ]);
         assert_eq!(session.metadata["source"], "pi_agent");
+    }
+
+    #[test]
+    fn reader_omp_metadata_has_source_and_slug() {
+        let session = read_omp(&[
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"test"}}"#,
+        ]);
+        assert_eq!(session.metadata["source"], "omp");
+        assert_eq!(session.provider_slug, "omp");
     }
 
     // -----------------------------------------------------------------------
@@ -1200,6 +1373,14 @@ mod tests {
         assert!(cmd.ends_with("/sessions/my-session.jsonl"), "got: {cmd}");
     }
 
+    #[test]
+    fn writer_resume_command_omp() {
+        let provider = Omp;
+        let cmd = provider.resume_command("my-session");
+        assert!(cmd.starts_with("omp --session "), "got: {cmd}");
+        assert!(cmd.ends_with("/sessions/my-session.jsonl"), "got: {cmd}");
+    }
+
     /// Regression test for issue #9: Codex→Pi session resumption crashed Pi
     /// with `TypeError: message.content.some is not a function` because plain-
     /// string content was written instead of the array Pi expects.
@@ -1334,40 +1515,130 @@ mod tests {
         assert_eq!(provider.cli_alias(), "pi");
     }
 
+    #[test]
+    fn provider_metadata_omp() {
+        let provider = Omp;
+        assert_eq!(provider.name(), "OMP (oh-my-pi)");
+        assert_eq!(provider.slug(), "omp");
+        assert_eq!(provider.cli_alias(), "omp");
+    }
+
     // -----------------------------------------------------------------------
-    // OMP_HOME env var support
+    // Home directory resolution (env override vs flavor default)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn home_dir_prefers_omp_home_env() {
-        // When OMP_HOME is set to an existing directory it wins.
+    fn home_dir_env_override_wins_over_default() {
+        // When the flavor's env var is set it wins, even if the path does
+        // not exist yet (the writer must be able to create it).
         let tmp = tempfile::tempdir().unwrap();
-        let omp_path = tmp.path().join("omp-home").to_string_lossy().to_string();
-        std::fs::create_dir_all(&omp_path).unwrap();
+        let env_path = tmp.path().join("custom-home").to_string_lossy().to_string();
 
-        let resolved = PiAgent::home_dir_impl(Some(omp_path.clone()), None);
-        assert_eq!(resolved, std::path::PathBuf::from(&omp_path));
+        let resolved = PiEngine::home_dir_impl(Some(env_path.clone()), PiFlavor::Pi.default_home());
+        assert_eq!(resolved, std::path::PathBuf::from(&env_path));
+
+        let resolved =
+            PiEngine::home_dir_impl(Some(env_path.clone()), PiFlavor::Omp.default_home());
+        assert_eq!(resolved, std::path::PathBuf::from(&env_path));
     }
 
     #[test]
-    fn home_dir_falls_back_to_pi_agent_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pi_path = tmp.path().join("pi-home").to_string_lossy().to_string();
-        std::fs::create_dir_all(&pi_path).unwrap();
-
-        let resolved = PiAgent::home_dir_impl(None, Some(pi_path.clone()));
-        assert_eq!(resolved, std::path::PathBuf::from(&pi_path));
+    fn home_dir_falls_back_to_flavor_default() {
+        let resolved = PiEngine::home_dir_impl(None, PathBuf::from("/explicit/default"));
+        assert_eq!(resolved, PathBuf::from("/explicit/default"));
     }
 
     #[test]
-    fn home_dir_omp_env_takes_precedence_over_pi_env() {
-        let tmp = tempfile::tempdir().unwrap();
-        let omp_path = tmp.path().join("omp-home").to_string_lossy().to_string();
-        let pi_path = tmp.path().join("pi-home").to_string_lossy().to_string();
-        std::fs::create_dir_all(&omp_path).unwrap();
-        std::fs::create_dir_all(&pi_path).unwrap();
+    fn flavors_use_distinct_env_vars_and_defaults() {
+        // The two flavors must never share a home root or an env override;
+        // sharing would hide one store behind the other.
+        assert_ne!(PiFlavor::Pi.home_env_var(), PiFlavor::Omp.home_env_var());
+        assert_ne!(PiFlavor::Pi.default_home(), PiFlavor::Omp.default_home());
+        assert_eq!(PiFlavor::Pi.home_env_var(), "PI_AGENT_HOME");
+        assert_eq!(PiFlavor::Omp.home_env_var(), "OMP_HOME");
+        assert!(
+            PiFlavor::Pi
+                .default_home()
+                .ends_with(Path::new(".pi").join("agent")),
+            "pi default home should be ~/.pi/agent"
+        );
+        assert!(
+            PiFlavor::Omp
+                .default_home()
+                .ends_with(Path::new(".omp").join("agent")),
+            "omp default home should be ~/.omp/agent"
+        );
+    }
 
-        let resolved = PiAgent::home_dir_impl(Some(omp_path.clone()), Some(pi_path.clone()));
-        assert_eq!(resolved, std::path::PathBuf::from(&omp_path));
+    #[test]
+    fn flavors_target_distinct_providers() {
+        assert_eq!(PiFlavor::Pi.slug(), "pi-agent");
+        assert_eq!(PiFlavor::Omp.slug(), "omp");
+        assert_eq!(PiFlavor::Pi.resume_binary(), "pi");
+        assert_eq!(PiFlavor::Omp.resume_binary(), "omp");
+        assert_eq!(PiFlavor::Pi.source_tag(), "pi_agent");
+        assert_eq!(PiFlavor::Omp.source_tag(), "omp");
+    }
+
+    // -----------------------------------------------------------------------
+    // owns_session content sniffing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn content_sniffer_accepts_session_header_first() {
+        let buf = br#"{"type":"session","version":3,"id":"abc","timestamp":"2026-08-22T01:46:16.013Z","cwd":"/tmp","provider":"openai-codex","modelId":"gpt-5.5"}
+{"type":"message","timestamp":"2026-08-22T01:46:20Z","message":{"role":"user","content":"hi"}}
+"#;
+        assert!(PiEngine::content_looks_like_pi_session(buf));
+    }
+
+    #[test]
+    fn content_sniffer_accepts_title_line_before_session_header() {
+        // Regression: omp v18 / recent pi prepend a padded `title` metadata
+        // line before the session header. The sniffer must scan past it.
+        let buf = br#"{"type":"title","v":1,"title":"Release 0.1.23 completed","source":"auto","updatedAt":"2026-09-05T12:24:34.018Z","pad":"                                                                    "}
+{"type":"session","version":3,"id":"abc","timestamp":"2026-09-04T15:33:24.788Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-09-04T15:33:30Z","message":{"role":"user","content":"hi"}}
+"#;
+        assert!(PiEngine::content_looks_like_pi_session(buf));
+    }
+
+    #[test]
+    fn content_sniffer_accepts_message_when_header_consumed() {
+        let buf = br#"{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"resumed mid-stream"}}
+"#;
+        assert!(PiEngine::content_looks_like_pi_session(buf));
+    }
+
+    #[test]
+    fn content_sniffer_rejects_other_provider_jsonl() {
+        // Claude Code-style entries never declare type session/message.
+        let buf = br#"{"type":"user","sessionId":"abc","uuid":"u1","cwd":"/tmp"}
+{"type":"assistant","sessionId":"abc","uuid":"u2"}
+"#;
+        assert!(!PiEngine::content_looks_like_pi_session(buf));
+    }
+
+    #[test]
+    fn content_sniffer_rejects_non_json_and_empty() {
+        assert!(!PiEngine::content_looks_like_pi_session(b"not json\n"));
+        assert!(!PiEngine::content_looks_like_pi_session(b""));
+        assert!(!PiEngine::content_looks_like_pi_session(
+            b"{\"type\":\"title\",\"pad\":\"x\"}\n"
+        ));
+    }
+
+    #[test]
+    fn content_sniffer_gives_up_after_bounded_scan() {
+        // Metadata lines without a session/message header within the scan
+        // window must not be claimed as pi sessions.
+        let mut buf = String::new();
+        for i in 0..12 {
+            buf.push_str(&format!(
+                "{{\"type\":\"meta-{i}\",\"data\":\"filler line to push the header out of window\"}}\n"
+            ));
+        }
+        buf.push_str("{\"type\":\"session\",\"id\":\"late\"}\n");
+        assert!(!PiEngine::content_looks_like_pi_session(buf.as_bytes()));
     }
 }

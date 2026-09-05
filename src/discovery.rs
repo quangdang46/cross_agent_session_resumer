@@ -116,6 +116,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::openclaw::OpenClaw),
             Box::new(crate::providers::hermes::Hermes),
             Box::new(crate::providers::pi_agent::PiAgent),
+            Box::new(crate::providers::pi_agent::Omp),
             Box::new(crate::providers::kiro::Kiro),
             Box::new(crate::providers::grok::Grok),
         ])
@@ -456,8 +457,9 @@ fn canonical_provider_token(token: &str) -> &str {
         "claude" => "claude-code",
         "codex-cli" => "codex",
         "gemini-cli" => "gemini",
-        // omp (oh-my-pi) CLI — same JSONL format as pi-agent.
-        "omp" => "pi-agent",
+        // omp (oh-my-pi) is its own provider (alias `omp`); only the less
+        // common human-facing spelling needs mapping.
+        "oh-my-pi" => "omp",
         // Hermes.
         "hermes" => "hermes",
         "antigravity-cli" => "antigravity",
@@ -1106,7 +1108,7 @@ mod tests {
 
         let mut expected: Vec<String> = vec![
             "cc", "cod", "gmi", "agy", "cur", "cln", "aid", "amp", "opc", "gpt", "grk", "cwb",
-            "vib", "fac", "ocl", "kr", "jc", "pi", "her",
+            "vib", "fac", "ocl", "kr", "jc", "pi", "omp", "her",
         ]
         .into_iter()
         .map(String::from)
@@ -1120,18 +1122,20 @@ mod tests {
              or both. found={found:?} expected={expected:?}"
         );
 
-        // `omp` is a secondary alias for pi-agent. Verify the registry can
-        // resolve it (it's wired in `find_by_alias`).
+        // `omp` is its own provider (oh-my-pi fork of pi-agent, separate home
+        // under `~/.omp/agent`). Verify the registry can resolve it.
         assert!(
             registry.find_by_alias("omp").is_some(),
-            "omp must resolve to a provider (secondary alias for pi-agent)"
+            "omp must resolve to a provider (oh-my-pi)"
+        );
+        assert!(
+            registry.find_by_alias("oh-my-pi").is_some(),
+            "oh-my-pi must resolve to the omp provider"
         );
         // All aliases must be unique.
-        let mut all_aliases = found.clone();
-        all_aliases.push("omp".to_string());
-        let mut deduped = all_aliases.clone();
+        let mut deduped = found.clone();
         deduped.sort();
         deduped.dedup();
-        assert_eq!(all_aliases.len(), deduped.len(), "duplicate alias detected");
+        assert_eq!(found.len(), deduped.len(), "duplicate alias detected");
     }
 }

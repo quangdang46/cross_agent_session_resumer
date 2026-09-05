@@ -134,6 +134,7 @@ export VIBE_HOME="$TMPDIR_ROOT/vibe"
 export FACTORY_HOME="$TMPDIR_ROOT/factory"
 export OPENCLAW_HOME="$TMPDIR_ROOT/openclaw"
 export PI_AGENT_HOME="$TMPDIR_ROOT/pi-agent"
+export OMP_HOME="$TMPDIR_ROOT/omp"
 # Providers without isolated home dirs by default; override to keep the e2e
 # test hermetic regardless of host machine state.
 export KIRO_HOME="$TMPDIR_ROOT/kiro"
@@ -480,7 +481,7 @@ reset_env() {
     rm -rf "$CLAUDE_HOME" "$CODEX_HOME" "$GEMINI_HOME" "$CURSOR_HOME" \
         "$CLINE_HOME" "$AIDER_HOME" "$AMP_HOME" "$OPENCODE_HOME" \
         "$CHATGPT_HOME" "$CLAWDBOT_HOME" "$VIBE_HOME" "$FACTORY_HOME" \
-        "$OPENCLAW_HOME" "$PI_AGENT_HOME" "$KIRO_HOME" "$JCODE_HOME"
+        "$OPENCLAW_HOME" "$PI_AGENT_HOME" "$OMP_HOME" "$KIRO_HOME" "$JCODE_HOME"
 }
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1005,29 @@ log "TEST: Resume PiAgent → CC"
 run_casr "resume pi->cc" resume cc "$pi_sid" --source pi
 assert_exit_ok "PiAgent→CC write succeeds"
 assert_stdout_contains "piagent→cc shows claude-code" "claude-code"
+
+# ===========================================================================
+# TEST: Resume — CC → OMP (oh-my-pi)
+# ===========================================================================
+
+log "TEST: Resume CC → OMP"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "resume cc->omp" --json resume omp "$cc_sid"
+assert_exit_ok "CC→OMP write succeeds"
+assert_valid_json "CC→OMP JSON is valid"
+omp_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+if [[ -n "$omp_sid" ]]; then
+    pass "CC→OMP JSON includes target_session_id"
+else
+    fail "CC→OMP JSON includes target_session_id" "non-empty id" "<empty>"
+fi
+assert_file_exists "OMP JSONL exists after conversion" "$OMP_HOME/sessions/${omp_sid}.jsonl"
+
+log "TEST: Resume OMP → CC"
+run_casr "resume omp->cc" resume cc "$omp_sid" --source omp
+assert_exit_ok "OMP→CC write succeeds"
+assert_stdout_contains "omp→cc shows claude-code" "claude-code"
 
 # ===========================================================================
 # TEST: Error cases

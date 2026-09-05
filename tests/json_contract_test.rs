@@ -264,8 +264,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        19,
-        "should list 19 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, Kiro, Grok)"
+        20,
+        "should list 20 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, OMP, Kiro, Grok)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -304,6 +304,7 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"factory"), "should contain factory");
     assert!(slugs.contains(&"openclaw"), "should contain openclaw");
     assert!(slugs.contains(&"pi-agent"), "should contain pi-agent");
+    assert!(slugs.contains(&"omp"), "should contain omp");
     assert!(slugs.contains(&"kiro"), "should contain kiro");
     assert!(slugs.contains(&"jcode"), "should contain jcode");
     assert!(slugs.contains(&"hermes"), "should contain hermes");
@@ -345,6 +346,7 @@ fn contract_providers_aliases_match_slugs() {
             "factory" => assert_eq!(*alias, "fac"),
             "openclaw" => assert_eq!(*alias, "ocl"),
             "pi-agent" => assert_eq!(*alias, "pi"),
+            "omp" => assert_eq!(*alias, "omp"),
             "kiro" => assert_eq!(*alias, "kr"),
             "jcode" => assert_eq!(*alias, "jc"),
             "hermes" => assert_eq!(*alias, "her"),
@@ -1060,6 +1062,7 @@ fn contract_list_provider_field_matches_slug() {
         "openclaw",
         "hermes",
         "pi-agent",
+        "omp",
         "kiro",
         "grok",
     ];
