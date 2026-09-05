@@ -222,6 +222,14 @@ impl OpenCode {
         }
 
         if let Some(workspace) = &session.workspace {
+            // Discovery builds its candidates from `current_dir()`, which
+            // resolves symlinks (macOS spells `/var/...` cwds as
+            // `/private/var/...`). Canonicalize so the DB this write creates
+            // is the very path discovery will report; otherwise the same
+            // session round-trips under two spellings that compare unequal.
+            let workspace = workspace
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.clone());
             return Ok(workspace.join(DATA_DIRNAME).join(DB_FILENAME));
         }
 
