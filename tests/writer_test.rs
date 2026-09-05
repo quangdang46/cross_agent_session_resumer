@@ -185,12 +185,12 @@ fn writer_cc_roundtrip() {
             "CC roundtrip msg {i}: content mismatch"
         );
     }
-    // Claude Code writer stamps process CWD into entries (resume from casr's
-    // invocation directory), not the source session workspace.
-    let process_cwd = std::env::current_dir().ok();
+    // GH #20 contract: the CC writer stamps the session's recorded workspace
+    // (invoking cwd only as a fallback when none was recorded — never /tmp).
+    let recorded = session.workspace.clone();
     assert_eq!(
-        readback.workspace, process_cwd,
-        "CC roundtrip: workspace should be process CWD"
+        readback.workspace, recorded,
+        "CC roundtrip: workspace should be preserved from the source session"
     );
     assert!(
         readback.model_name.is_some(),
@@ -322,9 +322,14 @@ fn writer_cc_workspace_directory_placement() {
         .unwrap();
 
     let path = &written.paths[0];
-    // Placement follows process CWD project key (not source session workspace).
-    let expected_dir_key =
-        casr::providers::claude_code::project_dir_key(&std::env::current_dir().unwrap());
+    // GH #20 contract: placement follows the recorded workspace's project key
+    // (invoking cwd only as a fallback when none was recorded).
+    let expected_dir_key = casr::providers::claude_code::project_dir_key(
+        session
+            .workspace
+            .as_deref()
+            .expect("session records a workspace"),
+    );
     let parent = path.parent().unwrap();
     assert!(
         parent.ends_with(&expected_dir_key),

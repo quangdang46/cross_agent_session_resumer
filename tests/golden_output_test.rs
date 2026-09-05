@@ -440,16 +440,21 @@ mod cc_golden {
     }
 
     #[test]
-    fn golden_cc_cwd_matches_cwd() {
+    fn golden_cc_cwd_matches_recorded_workspace() {
+        // GH #20 contract: the CC writer stamps the session's recorded
+        // workspace (falling back to the invoking cwd only when it recorded
+        // none — never /tmp).
         let session = simple_session();
         let (_, content) = write_cc_session(&session);
         let first: serde_json::Value =
             serde_json::from_str(content.lines().next().unwrap()).unwrap();
-        let expected_cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            first["cwd"].as_str().unwrap(),
-            expected_cwd.to_string_lossy()
-        );
+        let expected_cwd = session
+            .workspace
+            .as_ref()
+            .expect("simple_session records a workspace")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(first["cwd"].as_str().unwrap(), expected_cwd);
     }
 
     #[test]
@@ -574,9 +579,16 @@ mod cc_golden {
 
     #[test]
     fn golden_cc_path_includes_project_dir_key() {
-        let (path, _) = write_cc_session(&simple_session());
+        let session = simple_session();
+        let (path, _) = write_cc_session(&session);
         let path_str = path.to_string_lossy();
-        let expected_key = project_dir_key(&std::env::current_dir().unwrap());
+        let expected_key = project_dir_key(
+            session
+                .workspace
+                .as_ref()
+                .map(std::path::Path::new)
+                .unwrap_or_else(|| std::path::Path::new("/")),
+        );
         assert!(
             path_str.contains(&expected_key),
             "CC path should contain project dir key, got: {path_str}"

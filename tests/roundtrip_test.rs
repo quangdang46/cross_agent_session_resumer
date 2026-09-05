@@ -533,11 +533,12 @@ fn roundtrip_codex_to_cc() {
     assert_roundtrip_fidelity(&original, &readback, "Cod→CC");
     assert_new_session_id(&readback, "Cod→CC");
 
-    // CC stores the CWD (where casr was run) in each JSONL entry, not the
-    // source session workspace.
-    assert_ne!(
+    // GH #20 contract: CC stamps the session's recorded workspace (falling
+    // back to the invoking cwd only when none was recorded — never /tmp), so
+    // the readback workspace must match the source's.
+    assert_eq!(
         original.workspace, readback.workspace,
-        "Cod→CC: workspace should differ (CC uses CWD, not source workspace)"
+        "Cod→CC: workspace should be preserved from the source session"
     );
 }
 

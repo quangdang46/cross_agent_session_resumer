@@ -423,12 +423,17 @@ fn pipeline_workspace_override_wins_over_recorded_workspace() {
         .convert("tgt", "sid-ov", opts)
         .expect("convert with workspace override should succeed");
 
+    // The pipeline absolutizes the override before stamping it (GH #20
+    // follow-up), which canonicalizes existing directories — on macOS that
+    // resolves the /var/folders symlink to /private/var/folders. Compare in
+    // canonical form so the assertion is symlink-safe.
+    let expected_override = casr::pipeline::absolutize_workspace(override_dir.path());
     assert_eq!(
         dst.last_written()
             .expect("target should capture written session")
             .workspace
             .as_deref(),
-        Some(override_dir.path()),
+        Some(expected_override.as_path()),
         "writer must receive the overridden workspace"
     );
     assert!(
