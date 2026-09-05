@@ -1371,11 +1371,29 @@ fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
     }
 
     for call in &message.tool_calls {
+        // Native opencode validates tool parts: `state.input` must be an
+        // OBJECT and the state carries the full shape (output, metadata,
+        // title, time) — missing keys fail schema validation at import and
+        // resuming the session dies with UnknownError.
         let input = if let Some(s) = call.arguments.as_str() {
-            s.to_string()
+            serde_json::from_str::<serde_json::Value>(s).unwrap_or_else(|_| serde_json::json!({}))
+        } else if call.arguments.is_null() {
+            serde_json::json!({})
         } else {
-            serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
+            call.arguments.clone()
         };
+        let output = message
+            .tool_results
+            .iter()
+            .find(|tr| tr.call_id.as_deref() == call.id.as_deref())
+            .map(|tr| tr.content.clone())
+            .unwrap_or_default();
+        let ts = message.timestamp.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        });
         parts.push(serde_json::json!({
             "type": "tool",
             "tool": call.name,
@@ -1383,6 +1401,10 @@ fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
             "state": {
                 "status": "completed",
                 "input": input,
+                "output": output,
+                "metadata": {},
+                "title": "",
+                "time": {"start": ts, "end": ts},
             }
         }));
     }
