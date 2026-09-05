@@ -85,5 +85,8 @@ gemini.mcp.json
 # Omo agent runtime state
 .omo/
 
+# Hashline tool cache
+.hashline/
+
 # One-off test shell scripts at repo root
 /test_*.sh
