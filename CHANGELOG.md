@@ -6,6 +6,19 @@ Versions correspond to [GitHub Releases](https://github.com/Dicklesworthstone/cr
 
 ---
 
+## [v0.4.0] — 2026-09-06
+
+> **Git tag**: `v0.4.0` on commit `929c5e7`.
+
+### New Provider: ZCode (Z.AI ADE)
+
+- **ZCode provider** — full read/write/list support for Z.AI's Agentic Development Environment. Reads sessions from the real SQLite database at `~/.zcode/cli/db/db.sqlite` (V2 schema: `session`/`message`/`part` with `sequence` triggers). Alias: `zc`. Resume: `zcode --resume <id>`. Filters `subagent_child` sessions. (`929c5e7`)
+- Cross-provider conversions verified: ZCode ↔ Claude Code, Codex, OpenCode, OMP, Pi-Agent — all 11 paths pass with real CLI chat tests.
+- 9 new unit tests (roundtrip, conflict handling, list, parse_parts, compaction markers).
+- Updated JSON contract tests for 21 providers.
+
+---
+
 ## [Unreleased] (after v0.1.1)
 
 > Commits on `main` since the v0.1.1 tag (`be1ce19`, 2026-03-03). No GitHub Release yet.
