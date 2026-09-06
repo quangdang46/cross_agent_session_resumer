@@ -74,7 +74,12 @@ impl ZCode {
                 return Some(home_path);
             }
             // Directory: assume `<home>/cli/db/db.sqlite`.
-            return Some(home_path.join(CLI_DIRNAME).join(DB_DIRNAME).join(DB_FILENAME));
+            return Some(
+                home_path
+                    .join(CLI_DIRNAME)
+                    .join(DB_DIRNAME)
+                    .join(DB_FILENAME),
+            );
         }
 
         None
@@ -145,8 +150,7 @@ impl ZCode {
                 .join(DB_DIRNAME)
                 .join(DB_FILENAME);
             if let Some(parent) = default.parent() {
-                std::fs::create_dir_all(parent)
-                    .context("failed to create ZCode db directory")?;
+                std::fs::create_dir_all(parent).context("failed to create ZCode db directory")?;
             }
             return Ok(default);
         }
@@ -296,7 +300,12 @@ impl ZCode {
             anyhow::bail!("ZCode DB has no messages table: {}", db_path.display());
         }
 
-        let (title_raw, created_raw, updated_raw, parent_session_id): (String, i64, i64, Option<String>) = conn
+        let (title_raw, created_raw, updated_raw, parent_session_id): (
+            String,
+            i64,
+            i64,
+            Option<String>,
+        ) = conn
             .query_row(
                 "SELECT title, created_at, updated_at, parent_session_id
                  FROM sessions
@@ -305,11 +314,14 @@ impl ZCode {
                 rusqlite::params![session_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .with_context(|| format!("session '{session_id}' not found in {}", db_path.display()))?;
+            .with_context(|| {
+                format!("session '{session_id}' not found in {}", db_path.display())
+            })?;
 
         let mut started_at = parse_timestamp(&serde_json::Value::from(created_raw));
         let mut ended_at = parse_timestamp(&serde_json::Value::from(updated_raw)).or(started_at);
-        let mut model_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut model_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut messages = Vec::new();
 
         let mut stmt = conn
@@ -444,7 +456,8 @@ impl ZCode {
 
         let mut started_at = parse_timestamp(&serde_json::Value::from(created_raw));
         let mut ended_at = parse_timestamp(&serde_json::Value::from(updated_raw)).or(started_at);
-        let mut model_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut model_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut messages = Vec::new();
 
         let mut msg_stmt = conn
@@ -505,8 +518,14 @@ impl ZCode {
             let model = data
                 .get("modelID")
                 .and_then(serde_json::Value::as_str)
-                .or_else(|| data.pointer("/model/modelID").and_then(serde_json::Value::as_str))
-                .or_else(|| data.pointer("/model/id").and_then(serde_json::Value::as_str))
+                .or_else(|| {
+                    data.pointer("/model/modelID")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| {
+                    data.pointer("/model/id")
+                        .and_then(serde_json::Value::as_str)
+                })
                 .filter(|m| !m.is_empty())
                 .map(ToString::to_string);
 
@@ -1065,8 +1084,7 @@ fn write_session_v2(
             _ => {}
         }
 
-        let data_json =
-            serde_json::to_string(&data).context("serialize ZCode v2 message data")?;
+        let data_json = serde_json::to_string(&data).context("serialize ZCode v2 message data")?;
 
         tx.execute(
             "INSERT INTO message (id, session_id, time_created, time_updated, data)
