@@ -264,8 +264,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        20,
-        "should list 20 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, OMP, Kiro, Grok)"
+        21,
+        "should list 21 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, OMP, Kiro, Grok, ZCode)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -351,6 +351,7 @@ fn contract_providers_aliases_match_slugs() {
             "jcode" => assert_eq!(*alias, "jc"),
             "hermes" => assert_eq!(*alias, "her"),
             "grok" => assert_eq!(*alias, "grk"),
+            "zcode" => assert_eq!(*alias, "zc"),
             other => panic!("Unexpected slug: {other}"),
         }
     }
@@ -432,7 +433,20 @@ fn contract_list_json_empty() {
         .unwrap_or_else(|e| panic!("Invalid JSON from list: {e}\nOutput: {stdout}"));
 
     let items = assert_list_envelope(&parsed);
-    assert!(items.is_empty(), "empty env should yield empty items");
+    // Global-DB providers (ZCode, OpenCode) return sessions even from an
+    // empty workspace because their sessions live in a single shared DB.
+    // Only assert that no per-workspace providers (Claude Code, Gemini, etc.)
+    // appear in the results.
+    for item in items {
+        let provider = item["provider"].as_str().unwrap_or("");
+        assert!(
+            !matches!(
+                provider,
+                "claude-code" | "gemini" | "codex" | "cursor" | "cline"
+            ),
+            "per-workspace provider '{provider}' should not appear in empty workspace list"
+        );
+    }
 }
 
 #[test]
@@ -1065,6 +1079,7 @@ fn contract_list_provider_field_matches_slug() {
         "omp",
         "kiro",
         "grok",
+        "zcode",
     ];
     for item in items {
         let provider = item["provider"].as_str().unwrap();

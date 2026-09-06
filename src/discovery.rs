@@ -119,6 +119,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::pi_agent::Omp),
             Box::new(crate::providers::kiro::Kiro),
             Box::new(crate::providers::grok::Grok),
+            Box::new(crate::providers::zcode::ZCode),
         ])
     }
 
@@ -466,6 +467,8 @@ fn canonical_provider_token(token: &str) -> &str {
         // Grok Build (xAI).
         "xai" => "grok",
         "grok-build" => "grok",
+        // ZCode (Z.AI ADE).
+        "z.ai" => "zcode",
         _ => token,
     }
 }
@@ -1108,7 +1111,7 @@ mod tests {
 
         let mut expected: Vec<String> = vec![
             "cc", "cod", "gmi", "agy", "cur", "cln", "aid", "amp", "opc", "gpt", "grk", "cwb",
-            "vib", "fac", "ocl", "kr", "jc", "pi", "omp", "her",
+            "vib", "fac", "ocl", "kr", "jc", "pi", "omp", "her", "zc",
         ]
         .into_iter()
         .map(String::from)

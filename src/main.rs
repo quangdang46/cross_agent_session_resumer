@@ -27,8 +27,8 @@ const PEEK_SNIPPET_MAX_CHARS: usize = 200;
 
 /// Cross Agent Session Resumer — resume AI coding sessions across providers.
 ///
-/// Convert sessions between Claude Code, Codex, Gemini CLI, Antigravity CLI, Cursor, Cline, Aider, Amp, OpenCode, and
-/// ChatGPT so you can pick up where you left off with a different agent.
+/// Convert sessions between Claude Code, Codex, Gemini CLI, Antigravity CLI, Cursor, Cline, Aider, Amp, OpenCode,
+/// ChatGPT, and ZCode so you can pick up where you left off with a different agent.
 #[derive(Parser, Debug)]
 #[command(
     name = "casr",
@@ -57,7 +57,7 @@ struct Cli {
 enum Command {
     /// Convert and resume a session from another provider.
     Resume {
-        /// Target provider alias (agy, aid, amp, cc, cln, cod, cur, cwb, fac, gmi, gpt, grk, her, jc, kr, ocl, omp, opc, pi, vib).
+        /// Target provider alias (agy, aid, amp, cc, cln, cod, cur, cwb, fac, gmi, gpt, grk, her, jc, kr, ocl, omp, opc, pi, vib, zc).
         target: String,
         /// Session ID to convert.
         session_id: String,
@@ -244,6 +244,7 @@ fn rewrite_shorthand_resume_args(args: Vec<OsString>) -> Vec<OsString> {
             "-agy" => Some("agy"),
             "-omp" => Some("omp"),
             "-opc" => Some("opencode"),
+            "-zc" => Some("zcode"),
             _ => None,
         };
 
@@ -911,6 +912,7 @@ fn cmd_list(
             "openclaw" => "OpenClaw",
             "omp" => "OMP (oh-my-pi)",
             "pi-agent" => "Pi-Agent",
+            "zcode" => "ZCode",
             _ => provider,
         }
     }

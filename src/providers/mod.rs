@@ -24,6 +24,7 @@ pub mod openclaw;
 pub mod opencode;
 pub mod pi_agent;
 pub mod vibe;
+pub mod zcode;
 
 use std::path::{Path, PathBuf};
 
