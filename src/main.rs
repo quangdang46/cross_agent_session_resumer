@@ -160,6 +160,113 @@ enum Command {
     /// List detected providers and their installation status.
     Providers,
 
+    /// Bundle a session for transfer to another machine.
+    ///
+    /// Packs the transcript plus its `tool-results/` and `subagents/` sidecars
+    /// into one directory, and records the cwd so the receiving machine can
+    /// place the session in the right slug. A torn tail from a concurrent write
+    /// is dropped rather than carried.
+    Pack {
+        /// Session ID to pack.
+        session_id: String,
+
+        /// Where the working tree lives on this machine. Defaults to the
+        /// session's recorded cwd.
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+
+        /// Output directory. Defaults to `~/.casr/packs/<session-id>`.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+
+        /// Include the uncommitted diff and branch so the destination is not
+        /// missing files the transcript claims to have edited.
+        #[arg(long)]
+        with_git: bool,
+
+        /// Report what would be packed without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Restore a packed session into this machine's Claude Code store.
+    ///
+    /// The reverse of `pack`: reads a bundle, checks it, and writes the
+    /// transcript into the slug of *this* machine's checkout so
+    /// `claude --resume <id>` finds it. Nothing is deleted — a destination that
+    /// already holds the session is refused unless `--force` is given.
+    Unpack {
+        /// Bundle directory produced by `casr pack`, or the `bundle.json`
+        /// inside it.
+        bundle: std::path::PathBuf,
+
+        /// Working tree the restored session belongs to. Defaults to the
+        /// current directory: the bundle records the *source* machine's path,
+        /// which rarely exists here.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<std::path::PathBuf>,
+
+        /// Overwrite a session that already exists at the destination.
+        #[arg(long)]
+        force: bool,
+
+        /// Report what would be restored without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Send a packed session to another machine over a git ref.
+    ///
+    /// Reads the bundle at `--bundle` (or the default `~/.casr/packs/<id>`),
+    /// verifies every file the manifest lists, and commits it to
+    /// `refs/casr/packs/<id>` on `--remote`. The push is a fast-forward by
+    /// construction, so an ordinary update never needs `--force`.
+    Push {
+        /// Session ID to send.
+        session_id: String,
+
+        /// Anything `git push` accepts: a URL, `user@host:path`, or a local path.
+        #[arg(long, value_name = "REMOTE")]
+        remote: String,
+
+        /// Bundle directory. Defaults to `~/.casr/packs/<session-id>`.
+        #[arg(long, value_name = "DIR")]
+        bundle: Option<std::path::PathBuf>,
+
+        /// Local object cache shared by every push and pull. Defaults to
+        /// `$CASR_TRANSPORT_DIR` or `~/.casr/transport`.
+        #[arg(long, value_name = "DIR")]
+        store: Option<std::path::PathBuf>,
+    },
+
+    /// Fetch a session another machine pushed, and stage it for `casr unpack`.
+    ///
+    /// The bundle is verified against the manifest that arrived with it before
+    /// a single file is written, and an existing destination is refused unless
+    /// `--overwrite` is given.
+    Pull {
+        /// Session ID to fetch.
+        session_id: String,
+
+        /// Anything `git fetch` accepts: a URL, `user@host:path`, or a local path.
+        #[arg(long, value_name = "REMOTE")]
+        remote: String,
+
+        /// Where the bundle is written. Defaults to
+        /// `~/.casr/pulls/<session-id>`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
+
+        /// Local object cache. Defaults to `$CASR_TRANSPORT_DIR` or
+        /// `~/.casr/transport`.
+        #[arg(long, value_name = "DIR")]
+        store: Option<std::path::PathBuf>,
+
+        /// Overwrite files already present at the destination.
+        #[arg(long)]
+        overwrite: bool,
+    },
+
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for (bash, zsh, fish).
@@ -329,6 +436,52 @@ fn main() -> ExitCode {
             peek_lines,
         } => cmd_info(&session_id, cli.json, enrich_fs, source, peek, peek_lines),
         Command::Providers => cmd_providers(cli.json),
+        Command::Pack {
+            session_id,
+            cwd,
+            out,
+            with_git,
+            dry_run,
+        } => cmd_pack(
+            &session_id,
+            cwd.as_deref(),
+            out.as_deref(),
+            with_git,
+            dry_run,
+            cli.json,
+        ),
+        Command::Unpack {
+            bundle,
+            cwd,
+            force,
+            dry_run,
+        } => cmd_unpack(&bundle, cwd.as_deref(), force, dry_run, cli.json),
+        Command::Push {
+            session_id,
+            remote,
+            bundle,
+            store,
+        } => cmd_push(
+            &session_id,
+            &remote,
+            bundle.as_deref(),
+            store.as_deref(),
+            cli.json,
+        ),
+        Command::Pull {
+            session_id,
+            remote,
+            out,
+            store,
+            overwrite,
+        } => cmd_pull(
+            &session_id,
+            &remote,
+            out.as_deref(),
+            store.as_deref(),
+            overwrite,
+            cli.json,
+        ),
         Command::Completions { shell } => cmd_completions(&shell),
     };
 
@@ -1666,6 +1819,537 @@ fn cmd_info(
     Ok(())
 }
 
+/// Bundle a session plus everything the transcript references, for transfer to
+/// another machine.
+///
+/// The transcript is not self-sufficient: measured on a real 27 MB session it
+/// referenced 4 files under `tool-results/` and 3 under `subagents/`. Copying
+/// the `.jsonl` alone loses both, and the destination would still see the
+/// session id in a picker with missing content.
+fn cmd_pack(
+    session_id: &str,
+    cwd: Option<&std::path::Path>,
+    out: Option<&std::path::Path>,
+    with_git: bool,
+    dry_run: bool,
+    json_mode: bool,
+) -> anyhow::Result<()> {
+    use casr::pack;
+
+    let root = pack::projects_root()?;
+    let slug = match cwd {
+        Some(c) => pack::slug_for_cwd(c),
+        None => find_slug_for_session(&root, session_id)?,
+    };
+    let src_dir = root.join(&slug);
+    let transcript = src_dir.join(format!("{session_id}.jsonl"));
+
+    if !transcript.exists() {
+        anyhow::bail!(
+            "no transcript for {session_id} under {}\n  \
+             The session id must resolve inside a single project slug — \
+             `claude --resume` has no global lookup, so pack needs to know which one.",
+            src_dir.display()
+        );
+    }
+
+    let cwd_path = cwd.map_or_else(|| root.join(&slug), std::path::Path::to_path_buf);
+    let session_dir = src_dir.join(session_id);
+    let sidecars = pack::collect_sidecars(&session_dir)?;
+    let src_bytes = std::fs::metadata(&transcript)?.len();
+
+    if dry_run {
+        let total: u64 = sidecars.iter().map(|s| s.bytes).sum();
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "dry_run": true,
+                    "session_id": session_id,
+                    "slug": slug,
+                    "source": transcript.display().to_string(),
+                    "transcript_bytes": src_bytes,
+                    "sidecars": sidecars.iter().map(|s| serde_json::json!({
+                        "rel": s.rel, "bytes": s.bytes
+                    })).collect::<Vec<_>>(),
+                    "total_bytes": src_bytes + total,
+                }))?
+            );
+        } else {
+            println!("Would pack {session_id} from {}", src_dir.display());
+            println!("  transcript : {}", human_bytes(src_bytes));
+            println!("  sidecars   : {}", human_bytes(total));
+            for s in &sidecars {
+                println!("      {}  {}", s.rel, human_bytes(s.bytes));
+            }
+        }
+        return Ok(());
+    }
+
+    let out_dir = out.map_or_else(
+        || {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".casr")
+                .join("packs")
+                .join(session_id)
+        },
+        std::path::Path::to_path_buf,
+    );
+    std::fs::create_dir_all(&out_dir)?;
+
+    let packed = out_dir.join(format!("{session_id}.jsonl"));
+    // Drop a torn tail: the agent may be mid-append as we read.
+    let offset = pack::copy_complete_lines(&transcript, &packed)?;
+
+    for s in &sidecars {
+        let from = session_dir.join(&s.rel);
+        let to = out_dir.join(pack::PAYLOAD_DIR).join(&s.rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&from, &to)?;
+    }
+
+    let git = if with_git {
+        capture_git_state(&cwd_path)
+    } else {
+        None
+    };
+
+    let bundle = pack::Bundle {
+        version: pack::BUNDLE_VERSION,
+        provider: "claude-code".into(),
+        session_id: session_id.into(),
+        cwd: cwd_path,
+        sidecars,
+        transcript_offset: offset,
+        transcript_bytes: src_bytes,
+        git,
+    };
+    // The manifest name is shared with `unpack`: a pack that writes a
+    // directory `unpack` cannot find is a silent transfer failure.
+    let manifest = out_dir.join(pack::MANIFEST_NAME);
+    std::fs::write(&manifest, serde_json::to_string_pretty(&bundle)?)?;
+    // The source transcript is 0600; a manifest carrying a branch name, a
+    // checkout path, and a worktree diff should not be more readable than the
+    // session it describes. `write` creates 0644 under the default umask, so
+    // the mode is set explicitly rather than left to the environment.
+    restrict_permissions(&manifest);
+
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "session_id": session_id,
+                "out": out_dir.display().to_string(),
+                "manifest": manifest.display().to_string(),
+                "transcript_bytes": packed.metadata()?.len(),
+                "transcript_offset": offset,
+                "sidecars": bundle.sidecars.len(),
+                "slug": slug,
+            }))?
+        );
+    } else {
+        println!("{}", "Packed".green().bold());
+        println!("  session   : {session_id}");
+        println!("  slug      : {slug}");
+        println!(
+            "  transcript: {} (offset {offset})",
+            human_bytes(packed.metadata()?.len())
+        );
+        println!("  sidecars  : {}", bundle.sidecars.len());
+        println!(
+            "  git       : {}",
+            if bundle.git.is_some() {
+                "captured"
+            } else {
+                "skipped"
+            }
+        );
+        println!("  out       : {}", out_dir.display());
+    }
+    Ok(())
+}
+
+/// Restore a packed session into this machine's Claude Code store.
+///
+/// The other half of `cmd_pack`. Everything that can be checked is checked in
+/// `pack::unpack` before the first byte is written, so this is presentation:
+/// resolve the arguments, hand off, and print the command that starts the work.
+fn cmd_unpack(
+    bundle: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    force: bool,
+    dry_run: bool,
+    json_mode: bool,
+) -> anyhow::Result<()> {
+    use casr::pack;
+
+    let bundle_dir = bundle_dir_of(bundle);
+    // The bundle's own cwd is the *source* machine's checkout, so it is almost
+    // never a directory here. The current one is what a user means by "put this
+    // session back in my project", and it is what the destination slug is
+    // derived from.
+    let dest_cwd = match cwd {
+        Some(c) => c.to_path_buf(),
+        None => std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cannot determine the current directory: {e}"))?,
+    };
+    let root = pack::projects_root_for_restore()?;
+    let report = pack::unpack(
+        &bundle_dir,
+        &root,
+        &dest_cwd,
+        pack::UnpackOptions { force, dry_run },
+    )?;
+    let resume = format!("claude --resume {}", report.session_id);
+
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "dry_run": report.dry_run,
+                "session_id": report.session_id,
+                "bundle_dir": report.bundle_dir.display().to_string(),
+                "source_cwd": report.source_cwd.display().to_string(),
+                "dest_cwd": dest_cwd.display().to_string(),
+                "slug": report.slug,
+                "transcript_path": report.transcript_path.display().to_string(),
+                "transcript_bytes": report.transcript_bytes,
+                "session_dir": report.session_dir.display().to_string(),
+                "sidecars": report.restored.len(),
+                "sidecars_restored": report.restored.iter().map(|s| serde_json::json!({
+                    "rel": s.rel, "bytes": s.bytes
+                })).collect::<Vec<_>>(),
+                "would_overwrite": report.would_overwrite,
+                "resume_command": resume,
+                "warnings": report.warnings,
+            }))?
+        );
+    } else {
+        let heading = if report.dry_run {
+            "Would restore".cyan().bold()
+        } else {
+            "Restored".green().bold()
+        };
+        println!("{heading} {}", report.session_id);
+        println!("  bundle     : {}", report.bundle_dir.display());
+        println!("  source cwd : {}", report.source_cwd.display());
+        println!("  dest slug  : {}", report.slug);
+        println!("  transcript : {}", human_bytes(report.transcript_bytes));
+        println!("  sidecars   : {}", report.restored.len());
+        println!("  to         : {}", report.transcript_path.display());
+        for w in &report.warnings {
+            println!("  {} {w}", "warning:".yellow());
+        }
+        // The slug comes from the destination cwd, so the resume has to be run
+        // from there. Shown on its own line rather than glued into the command,
+        // which stays copy-pasteable for anyone who is already there.
+        println!("  resume cwd : {}", dest_cwd.display());
+        println!("  resume     : {resume}");
+    }
+    Ok(())
+}
+
+/// Send a packed session to another machine over a git ref.
+///
+/// The bundle is read from disk and re-verified against its own manifest before
+/// anything is published: a pack that shipped short is a problem the sender can
+/// still fix, and a problem the receiver cannot.
+fn cmd_push(
+    session_id: &str,
+    remote: &str,
+    bundle: Option<&std::path::Path>,
+    store: Option<&std::path::Path>,
+    json_mode: bool,
+) -> anyhow::Result<()> {
+    use casr::transport::{GitTransport, PushRequest, Transport};
+
+    let transport = GitTransport::new(remote, transport_store(store)?);
+    let bundle_dir = match bundle {
+        Some(b) => bundle_dir_of(b),
+        None => home_dir().join(".casr").join("packs").join(session_id),
+    };
+
+    let receipt = transport.push(&PushRequest {
+        session_id: session_id.to_string(),
+        bundle_dir,
+        // An ordinary push is a fast-forward by construction. Overwriting a
+        // remote bundle is only ever something a person asked for, and it is
+        // not this command's job to offer, so the flag stays off the CLI
+        // entirely rather than defaulting to something quiet and destructive.
+        force: false,
+    })?;
+
+    if json_mode {
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+    } else {
+        let verb = if receipt.pushed {
+            "Pushed".green().bold()
+        } else {
+            "Already up to date".yellow().bold()
+        };
+        println!("{verb} {}", receipt.session_id);
+        println!("  transport : {}", receipt.transport);
+        println!("  remote    : {}", receipt.remote);
+        println!("  ref       : {}", receipt.ref_name);
+        println!("  commit    : {}", receipt.commit);
+        println!(
+            "  payload   : {} across {} files",
+            human_bytes(receipt.bytes),
+            receipt.files
+        );
+    }
+    Ok(())
+}
+
+/// Fetch a session another machine pushed and stage it for `casr unpack`.
+///
+/// The bundle is written to `dest_dir` as-is — a real directory under the
+/// user's home, not into any provider store — so it can be inspected before
+/// `unpack` places it. That is the whole point of the split: `pull` proves the
+/// bytes arrived, `unpack` decides where they belong.
+fn cmd_pull(
+    session_id: &str,
+    remote: &str,
+    out: Option<&std::path::Path>,
+    store: Option<&std::path::Path>,
+    overwrite: bool,
+    json_mode: bool,
+) -> anyhow::Result<()> {
+    use casr::transport::{GitTransport, PullRequest, Transport};
+
+    let transport = GitTransport::new(remote, transport_store(store)?);
+    let dest_dir = match out {
+        Some(o) => o.to_path_buf(),
+        None => home_dir().join(".casr").join("pulls").join(session_id),
+    };
+
+    let receipt = transport.pull(&PullRequest {
+        session_id: session_id.to_string(),
+        dest_dir,
+        force: false,
+        overwrite,
+    })?;
+
+    if json_mode {
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+    } else {
+        println!("{} {}", "Pulled".green().bold(), receipt.session_id);
+        println!("  transport : {}", receipt.transport);
+        println!("  remote    : {}", receipt.remote);
+        println!("  commit    : {}", receipt.commit);
+        println!(
+            "  payload   : {} across {} files ({} sidecars)",
+            human_bytes(receipt.bytes),
+            receipt.files,
+            receipt.sidecars
+        );
+        println!("  to        : {}", receipt.dest_dir.display());
+        println!();
+        println!("Restore it with:");
+        println!("  casr unpack {}", receipt.dest_dir.display());
+    }
+    Ok(())
+}
+
+/// Resolve the local object cache for a transport command.
+///
+/// An explicit `--store` wins, then `CASR_TRANSPORT_DIR` inside the transport
+/// module, then `~/.casr/transport`.
+fn transport_store(explicit: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
+    use casr::transport;
+    match explicit {
+        Some(s) => Ok(s.to_path_buf()),
+        None => Ok(transport::default_store_dir()?),
+    }
+}
+
+/// The user's home directory, or the current one when it cannot be determined.
+///
+/// Falling back rather than failing keeps `pack`, `push`, and `pull` usable in
+/// sandboxes and CI images that have no `$HOME`.
+fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Accept either a pack directory or the manifest inside it.
+///
+/// Both spellings are natural: `casr unpack ~/.casr/packs/<id>` is the path
+/// people remember, while a path copied out of a pack's own listing ends in
+/// `bundle.json`. Guessing wrong is harmless either way — the manifest lookup
+/// that follows reports a missing file with its real path.
+fn bundle_dir_of(arg: &std::path::Path) -> std::path::PathBuf {
+    if arg.is_dir() {
+        return arg.to_path_buf();
+    }
+    arg.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf()
+}
+
+/// Locate which project slug holds `session_id`.
+///
+/// `claude --resume` resolves a session only inside the slug of the current
+/// cwd, so pack must pick the slug deliberately rather than assume one.
+fn find_slug_for_session(root: &std::path::Path, session_id: &str) -> anyhow::Result<String> {
+    let needle = format!("{session_id}.jsonl");
+    // Collect every match before choosing. `read_dir` order is filesystem
+    // order, not lexical, so returning the first hit picked a different file
+    // on different runs — and a session id can legitimately appear under two
+    // slugs when a bundle has been restored to a second location. Measured:
+    // the first hit was a truncated copy missing 972,850 bytes and all ten
+    // sidecars, packed with no warning.
+    let mut matches: Vec<(std::path::PathBuf, u64)> = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let dir = entry?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let candidate = dir.join(&needle);
+        if candidate.exists() {
+            let bytes = candidate.metadata().map(|m| m.len()).unwrap_or(0);
+            matches.push((dir, bytes));
+        }
+    }
+
+    match matches.len() {
+        0 => anyhow::bail!(
+            "session {session_id} not found under {}\n  \
+             Run 'casr list --all' to see where it lives, then pass --cwd.",
+            root.display()
+        ),
+        1 => Ok(matches
+            .pop()
+            .and_then(|(d, _)| d.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_default()),
+        _ => {
+            // Name the ambiguity instead of resolving it silently. Packing the
+            // wrong copy loses data with no signal, so the caller picks.
+            let mut listing = matches
+                .iter()
+                .map(|(dir, bytes)| {
+                    format!(
+                        "  {}  {}",
+                        dir.file_name().unwrap_or_default().to_string_lossy(),
+                        crate::human_bytes(*bytes)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            listing.push_str("\n  Re-run with --cwd <path> to name one explicitly.");
+            anyhow::bail!(
+                "session {session_id} found in {} project slugs:\n{listing}\n  \
+                 Each holds a different file; packing the wrong one loses its \
+                 sidecars. Pass --cwd to choose, or --source <path>.",
+                matches.len()
+            );
+        }
+    }
+}
+
+/// Capture branch, head, and the uncommitted diff.
+///
+/// A bundle without this restores a session whose transcript claims to have
+/// edited files the destination does not have. `git diff` is used rather than a
+/// file list because a patch is portable: it carries its own paths.
+fn capture_git_state(cwd: &std::path::Path) -> Option<casr::pack::GitState> {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    };
+
+    run(&["rev-parse", "--is-inside-work-tree"])?;
+
+    // `rev-parse --abbrev-ref HEAD` does not fail on a detached HEAD — it
+    // prints the literal string "HEAD" and exits 0, so a caller that trusted
+    // the exit code would record the branch as being called "HEAD". The
+    // `--quiet` form is the one that actually signals the condition, and it
+    // keeps `fatal:` out of captured output.
+    let branch = run(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "(detached)".to_string());
+
+    // A repo with no commits yet has no HEAD to diff against, which is not a
+    // reason to drop the worktree state — the uncommitted diff is the whole
+    // point. Fall back to the empty tree.
+    let head = run(&["rev-parse", "HEAD"])
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
+    let diff_args = if run(&["rev-parse", "--verify", "HEAD"]).is_some() {
+        vec!["diff", "HEAD"]
+    } else {
+        vec!["diff"]
+    };
+    let raw_patch = run(&diff_args).unwrap_or_default();
+
+    // Redact before capping, so a secret cannot hide past the cap either.
+    let mut dirty_patch = casr::pack::redact_secrets(&raw_patch);
+    let dirty_patch_truncated = dirty_patch.len() > casr::pack::MAX_DIRTY_PATCH_BYTES;
+    if dirty_patch_truncated {
+        dirty_patch.truncate(dirty_patch.floor_char_boundary(casr::pack::MAX_DIRTY_PATCH_BYTES));
+        dirty_patch.push_str("\n<patch truncated by casr>\n");
+    }
+
+    let mut untracked = run(&["ls-files", "--others", "--exclude-standard"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    untracked.truncate(200);
+
+    Some(casr::pack::GitState {
+        branch,
+        head,
+        dirty_patch,
+        dirty_patch_truncated,
+        untracked,
+    })
+}
+
+/// Drop a file to owner-only access, matching the session store it describes.
+///
+/// Unix-only by name: on Windows the store's own ACLs govern access, and the
+/// mode bits here would be meaningless. Silently ignored elsewhere, because a
+/// bundle that cannot be read back is worse than one that is too permissive to
+/// notice.
+fn restrict_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+fn human_bytes(n: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    const KB: u64 = 1024;
+    if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 fn cmd_providers(json_mode: bool) -> anyhow::Result<()> {
     let registry = ProviderRegistry::default_registry();
     let results = registry.detect_all();
@@ -1718,4 +2402,29 @@ fn cmd_completions(shell: &str) -> anyhow::Result<()> {
     generate(parsed_shell, &mut cmd, "casr", &mut std::io::stdout());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_dir_accepts_a_directory_or_the_manifest_inside_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(bundle_dir_of(dir.path()), dir.path());
+
+        let manifest = dir.path().join("bundle.json");
+        std::fs::write(&manifest, "{}").expect("write");
+        assert_eq!(bundle_dir_of(&manifest), dir.path());
+    }
+
+    #[test]
+    fn bundle_dir_of_a_bare_filename_is_the_current_directory() {
+        // `Path::new("bundle.json").parent()` is `Some("")`, which would make
+        // the manifest lookup relative to an empty path instead of to ".".
+        assert_eq!(
+            bundle_dir_of(std::path::Path::new("bundle.json")),
+            std::path::PathBuf::from(".")
+        );
+    }
 }
