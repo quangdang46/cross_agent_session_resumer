@@ -1932,6 +1932,11 @@ fn cmd_pack(
     // directory `unpack` cannot find is a silent transfer failure.
     let manifest = out_dir.join(pack::MANIFEST_NAME);
     std::fs::write(&manifest, serde_json::to_string_pretty(&bundle)?)?;
+    // The source transcript is 0600; a manifest carrying a branch name, a
+    // checkout path, and a worktree diff should not be more readable than the
+    // session it describes. `write` creates 0644 under the default umask, so
+    // the mode is set explicitly rather than left to the environment.
+    restrict_permissions(&manifest);
 
     if json_mode {
         println!(
@@ -2194,22 +2199,58 @@ fn bundle_dir_of(arg: &std::path::Path) -> std::path::PathBuf {
 /// cwd, so pack must pick the slug deliberately rather than assume one.
 fn find_slug_for_session(root: &std::path::Path, session_id: &str) -> anyhow::Result<String> {
     let needle = format!("{session_id}.jsonl");
+    // Collect every match before choosing. `read_dir` order is filesystem
+    // order, not lexical, so returning the first hit picked a different file
+    // on different runs — and a session id can legitimately appear under two
+    // slugs when a bundle has been restored to a second location. Measured:
+    // the first hit was a truncated copy missing 972,850 bytes and all ten
+    // sidecars, packed with no warning.
+    let mut matches: Vec<(std::path::PathBuf, u64)> = Vec::new();
     for entry in std::fs::read_dir(root)? {
         let dir = entry?.path();
         if !dir.is_dir() {
             continue;
         }
-        if dir.join(&needle).exists() {
-            return Ok(dir
-                .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().to_string()));
+        let candidate = dir.join(&needle);
+        if candidate.exists() {
+            let bytes = candidate.metadata().map(|m| m.len()).unwrap_or(0);
+            matches.push((dir, bytes));
         }
     }
-    anyhow::bail!(
-        "session {session_id} not found under {}\n  \
-         Run 'casr list --all' to see where it lives, then pass --cwd.",
-        root.display()
-    );
+
+    match matches.len() {
+        0 => anyhow::bail!(
+            "session {session_id} not found under {}\n  \
+             Run 'casr list --all' to see where it lives, then pass --cwd.",
+            root.display()
+        ),
+        1 => Ok(matches
+            .pop()
+            .and_then(|(d, _)| d.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_default()),
+        _ => {
+            // Name the ambiguity instead of resolving it silently. Packing the
+            // wrong copy loses data with no signal, so the caller picks.
+            let mut listing = matches
+                .iter()
+                .map(|(dir, bytes)| {
+                    format!(
+                        "  {}  {}",
+                        dir.file_name().unwrap_or_default().to_string_lossy(),
+                        crate::human_bytes(*bytes)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            listing.push_str("\n  Re-run with --cwd <path> to name one explicitly.");
+            anyhow::bail!(
+                "session {session_id} found in {} project slugs:\n{listing}\n  \
+                 Each holds a different file; packing the wrong one loses its \
+                 sidecars. Pass --cwd to choose, or --source <path>.",
+                matches.len()
+            );
+        }
+    }
 }
 
 /// Capture branch, head, and the uncommitted diff.
@@ -2232,14 +2273,37 @@ fn capture_git_state(cwd: &std::path::Path) -> Option<casr::pack::GitState> {
 
     run(&["rev-parse", "--is-inside-work-tree"])?;
 
-    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let branch = branch.trim();
-    if branch.is_empty() {
-        return None;
+    // `rev-parse --abbrev-ref HEAD` does not fail on a detached HEAD — it
+    // prints the literal string "HEAD" and exits 0, so a caller that trusted
+    // the exit code would record the branch as being called "HEAD". The
+    // `--quiet` form is the one that actually signals the condition, and it
+    // keeps `fatal:` out of captured output.
+    let branch = run(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "(detached)".to_string());
+
+    // A repo with no commits yet has no HEAD to diff against, which is not a
+    // reason to drop the worktree state — the uncommitted diff is the whole
+    // point. Fall back to the empty tree.
+    let head = run(&["rev-parse", "HEAD"])
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
+    let diff_args = if run(&["rev-parse", "--verify", "HEAD"]).is_some() {
+        vec!["diff", "HEAD"]
+    } else {
+        vec!["diff"]
+    };
+    let raw_patch = run(&diff_args).unwrap_or_default();
+
+    // Redact before capping, so a secret cannot hide past the cap either.
+    let mut dirty_patch = casr::pack::redact_secrets(&raw_patch);
+    let dirty_patch_truncated = dirty_patch.len() > casr::pack::MAX_DIRTY_PATCH_BYTES;
+    if dirty_patch_truncated {
+        dirty_patch.truncate(dirty_patch.floor_char_boundary(casr::pack::MAX_DIRTY_PATCH_BYTES));
+        dirty_patch.push_str("\n<patch truncated by casr>\n");
     }
-    let head = run(&["rev-parse", "HEAD"]).unwrap_or_default();
-    let head = head.trim().to_string();
-    let dirty_patch = run(&["diff", "HEAD"]).unwrap_or_default();
 
     let mut untracked = run(&["ls-files", "--others", "--exclude-standard"])
         .unwrap_or_default()
@@ -2250,11 +2314,28 @@ fn capture_git_state(cwd: &std::path::Path) -> Option<casr::pack::GitState> {
     untracked.truncate(200);
 
     Some(casr::pack::GitState {
-        branch: branch.to_string(),
+        branch,
         head,
         dirty_patch,
+        dirty_patch_truncated,
         untracked,
     })
+}
+
+/// Drop a file to owner-only access, matching the session store it describes.
+///
+/// Unix-only by name: on Windows the store's own ACLs govern access, and the
+/// mode bits here would be meaningless. Silently ignored elsewhere, because a
+/// bundle that cannot be read back is worse than one that is too permissive to
+/// notice.
+fn restrict_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 fn human_bytes(n: u64) -> String {

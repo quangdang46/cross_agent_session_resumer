@@ -276,6 +276,7 @@ fn copy_git(git: &GitState) -> GitState {
         branch: git.branch.clone(),
         head: git.head.clone(),
         dirty_patch: git.dirty_patch.clone(),
+        dirty_patch_truncated: git.dirty_patch_truncated,
         untracked: git.untracked.clone(),
     }
 }
@@ -1300,6 +1301,7 @@ mod tests {
                 branch: "poc/cross-machine-session".into(),
                 head: "deadbeef".into(),
                 dirty_patch: "diff --git a/Cargo.toml b/Cargo.toml".into(),
+                dirty_patch_truncated: false,
                 untracked: vec!["notes.md".into()],
             }),
         }

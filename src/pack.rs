@@ -9,6 +9,15 @@
 //! <session-uuid>/subagents    7.7 MB  child agent transcripts
 //! ```
 //!
+//! The sidecars are **best-effort, not required for resume.** Measured by
+//! round-tripping with and without them: the context Claude Code reconstructs
+//! on `--resume` was byte-identical in every case, because the transcript
+//! already carries its own tool results and the transcript is what gets read.
+//! They are still packed — a restored session keeps its spawn history and its
+//! large tool output — but a lost sidecar degrades a bundle, it does not break
+//! it. An earlier revision of this module claimed the opposite, which was not
+//! true of any session tested.
+//!
 //! `claude --resume` reads a session from `~/.claude/projects/<slug(cwd)>/`,
 //! and a transfer to a different checkout path has to land in a different slug
 //! directory. Measured on 2.1.281, lookup also falls back to a one-level scan
@@ -109,28 +118,143 @@ pub fn slug_for_cwd(cwd: &Path) -> String {
     out
 }
 
-/// Resolve the Claude Code config directory.
+/// Cap on the captured diff, in bytes. A binary blob or a vendored lockfile
+/// can make `git diff HEAD` arbitrarily large, and the patch travels inside a
+/// manifest that is read, copied, and uploaded.
+pub const MAX_DIRTY_PATCH_BYTES: usize = 512 * 1024;
+
+/// Blank out credential-shaped substrings in captured text.
 ///
-/// `CLAUDE_HOME` wins over `$HOME/.claude`, matching
-/// `providers::claude_code::ClaudeCode::home_dir`. Honouring only one of the
-/// two is how a run aimed at an isolated store ends up reading the real one.
-fn claude_home(explicit: Option<String>, home: Option<PathBuf>) -> Result<PathBuf, CasrError> {
-    match explicit.filter(|h| !h.is_empty()) {
-        Some(dir) => Ok(PathBuf::from(dir)),
-        None => home
-            .map(|h| h.join(".claude"))
-            .ok_or_else(|| CasrError::SessionReadError {
-                path: PathBuf::from("~/.claude/projects"),
-                provider: "claude-code".into(),
-                detail: "cannot determine home directory; set HOME or CLAUDE_HOME".into(),
-            }),
+/// A diff is a faithful record of the worktree, which means it faithfully
+/// records anything that was committed and later reverted too: a `.env` whose
+/// value existed for one commit still appears in `git diff HEAD` against that
+/// commit. Bundles leave the machine, so the manifest is redacted before it is
+/// written rather than trusted to the caller's care.
+///
+/// Deliberately conservative — it only rewrites a line when the key looks
+/// secret, so an ordinary `max_attempts = 3` survives untouched. It is a
+/// backstop, not a guarantee: it cannot see a secret that does not match a
+/// known shape.
+pub fn redact_secrets(text: &str) -> String {
+    /// A key name that implies a credential, or any provider token prefix.
+    fn is_secret_key(key: &str) -> bool {
+        let upper = key.to_ascii_uppercase();
+        const MARKERS: [&str; 10] = [
+            "SECRET",
+            "TOKEN",
+            "PASSWORD",
+            "PASSWD",
+            "APIKEY",
+            "API_KEY",
+            "PRIVATE",
+            "CREDENTIAL",
+            "ACCESS_KEY",
+            "AUTH",
+        ];
+        MARKERS.iter().any(|m| upper.contains(m))
     }
+
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        // Provider tokens that appear in prose, not as KEY=value.
+        let scrubbed = scrub_token_shapes(line);
+        // KEY=value assignments, but only where the key itself looks like a
+        // credential — redacting every assignment would replace half the diff
+        // with markers and make it useless for restoring work.
+        let redacted = scrubbed.split_once('=').and_then(|(key, rest)| {
+            let shaped_like_a_key = !key.is_empty()
+                && key.len() <= 64
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+            (shaped_like_a_key && is_secret_key(key))
+                .then(|| format!("{key}=<redacted by casr, {} bytes>", rest.len()))
+        });
+        out.push_str(redacted.as_deref().unwrap_or(&scrubbed));
+        out.push('\n');
+    }
+    out
+}
+
+/// Replace well-known provider token shapes wherever they appear.
+fn scrub_token_shapes(line: &str) -> String {
+    const SHAPES: [&str; 4] = ["sk-", "ghp_", "github_pat_", "AKIA"];
+    const REDACTION: &str = "<redacted>";
+    let mut out = line.to_string();
+    for prefix in SHAPES {
+        let mut search = 0;
+        while let Some(rel) = out[search..].find(prefix) {
+            let start = search + rel;
+            let body_start = start + prefix.len();
+            // A token runs until a character that cannot belong to one. This
+            // keeps the redaction from swallowing the rest of the line when a
+            // prefix is followed by ordinary prose.
+            let end = out[body_start..]
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+                .map_or(out.len(), |i| body_start + i);
+            if end > body_start {
+                out.replace_range(start..end, REDACTION);
+                search = start + REDACTION.len();
+            } else {
+                // Prefix with no body: nothing to redact, and resuming from the
+                // same index would loop forever.
+                search = (start + prefix.len()).min(out.len());
+            }
+            if search >= out.len() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Resolve the Claude Code config directory from already-read values.
+///
+/// The `claude` binary honours **both** `CLAUDE_CONFIG_DIR` and `CLAUDE_HOME`;
+/// casr originally honoured only the latter. That is the worst possible
+/// mismatch: a test that points Claude Code at an isolated store and runs casr
+/// against the same id silently reads the real `~/.claude` — measured, 975,876
+/// bytes pulled out of the live store while every write was meant for a temp
+/// dir. `CLAUDE_CONFIG_DIR` wins, then `CLAUDE_HOME`, then `$HOME/.claude`.
+///
+/// Split from the environment read so the precedence is testable without
+/// mutating process state: `set_var` is `unsafe` on this toolchain and the
+/// crate forbids unsafe code.
+fn resolve_claude_home(
+    config_dir: Option<String>,
+    home: Option<String>,
+    home_fallback: Option<PathBuf>,
+) -> Result<PathBuf, CasrError> {
+    let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
+    if let Some(dir) = non_empty(config_dir) {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(dir) = non_empty(home) {
+        return Ok(PathBuf::from(dir));
+    }
+    home_fallback
+        .map(|h| h.join(".claude"))
+        .ok_or_else(|| CasrError::SessionReadError {
+            path: PathBuf::from("~/.claude/projects"),
+            provider: "claude-code".into(),
+            detail: "cannot determine home directory; set HOME, CLAUDE_HOME, or \
+                     CLAUDE_CONFIG_DIR"
+                .into(),
+        })
+}
+
+/// The config directory, read from the environment.
+fn claude_home() -> Result<PathBuf, CasrError> {
+    resolve_claude_home(
+        std::env::var("CLAUDE_CONFIG_DIR").ok(),
+        std::env::var("CLAUDE_HOME").ok(),
+        dirs::home_dir(),
+    )
 }
 
 /// The projects directory Claude Code reads sessions from.
 pub fn projects_root() -> Result<PathBuf, CasrError> {
-    let claude_dir =
-        claude_home(std::env::var("CLAUDE_HOME").ok(), dirs::home_dir())?.join("projects");
+    let claude_dir = claude_home()?.join("projects");
     if claude_dir.is_dir() {
         Ok(claude_dir)
     } else {
@@ -145,11 +269,11 @@ pub fn projects_root() -> Result<PathBuf, CasrError> {
 /// Same as [`projects_root`], but tolerates a store that does not exist yet.
 ///
 /// `unpack` is the one command whose whole job is to create it: a fresh
-/// `CLAUDE_HOME` — exactly what the E2E harness builds — has no `projects/`
+/// config dir — exactly what the E2E harness builds — has no `projects/`
 /// until the first restore. Requiring it to pre-exist would make the restore
 /// that creates the store impossible to run.
 pub fn projects_root_for_restore() -> Result<PathBuf, CasrError> {
-    Ok(claude_home(std::env::var("CLAUDE_HOME").ok(), dirs::home_dir())?.join("projects"))
+    Ok(claude_home()?.join("projects"))
 }
 
 /// Copy `session.jsonl` while dropping a torn tail.
@@ -297,8 +421,15 @@ pub struct GitState {
     pub branch: String,
     pub head: String,
     /// `git diff` output — portable, unlike the absolute paths in a diff stat.
+    /// Secret-shaped values are redacted and the body is capped; see
+    /// [`crate::pack::redact_secrets`].
     #[serde(default)]
     pub dirty_patch: String,
+    /// True when `dirty_patch` was cut at the cap. A truncated patch is not
+    /// enough to restore a worktree, so the destination must be told rather
+    /// than discovering it by trying to apply.
+    #[serde(default)]
+    pub dirty_patch_truncated: bool,
     pub untracked: Vec<String>,
 }
 
@@ -749,30 +880,51 @@ mod tests {
     }
 
     #[test]
-    fn claude_home_prefers_the_explicit_override() {
+    fn claude_config_dir_wins_over_claude_home() {
+        // The `claude` binary honours both. If casr honoured only CLAUDE_HOME,
+        // a run aimed at an isolated store would read the real ~/.claude.
         assert_eq!(
-            claude_home(Some("/tmp/alt".into()), Some(PathBuf::from("/home/me"))).expect("resolve"),
-            PathBuf::from("/tmp/alt")
+            resolve_claude_home(
+                Some("/tmp/iso".into()),
+                Some("/tmp/home".into()),
+                Some(PathBuf::from("/home/me")),
+            )
+            .expect("resolve"),
+            PathBuf::from("/tmp/iso")
+        );
+    }
+
+    #[test]
+    fn claude_home_is_used_when_config_dir_is_absent_or_empty() {
+        assert_eq!(
+            resolve_claude_home(
+                None,
+                Some("/tmp/home".into()),
+                Some(PathBuf::from("/home/me"))
+            )
+            .expect("resolve"),
+            PathBuf::from("/tmp/home")
+        );
+        // An empty override counts as none: `export CLAUDE_HOME=$unset` leaves
+        // exactly this behind, and honouring it would point the store at "".
+        assert_eq!(
+            resolve_claude_home(Some(String::new()), Some("/tmp/home".into()), None)
+                .expect("resolve"),
+            PathBuf::from("/tmp/home")
         );
     }
 
     #[test]
     fn claude_home_falls_back_to_dot_claude_under_home() {
         assert_eq!(
-            claude_home(None, Some(PathBuf::from("/home/me"))).expect("resolve"),
-            PathBuf::from("/home/me/.claude")
-        );
-        // An empty override counts as none: `export CLAUDE_HOME=$unset` leaves
-        // exactly this behind, and honouring it would point the store at "".
-        assert_eq!(
-            claude_home(Some(String::new()), Some(PathBuf::from("/home/me"))).expect("resolve"),
+            resolve_claude_home(None, None, Some(PathBuf::from("/home/me"))).expect("resolve"),
             PathBuf::from("/home/me/.claude")
         );
     }
 
     #[test]
-    fn claude_home_without_any_home_is_an_error() {
-        assert!(claude_home(None, None).is_err());
+    fn claude_home_without_any_candidate_is_an_error() {
+        assert!(resolve_claude_home(None, None, None).is_err());
     }
 
     #[test]
@@ -963,6 +1115,7 @@ mod tests {
                 branch: "feat/x".into(),
                 head: "deadbeef".into(),
                 dirty_patch: "diff --git a b".into(),
+                dirty_patch_truncated: false,
                 untracked: vec!["new.txt".into()],
             }),
         };
@@ -971,6 +1124,66 @@ mod tests {
         assert_eq!(back.session_id, b.session_id);
         assert_eq!(back.transcript_offset, 4096);
         assert_eq!(back.git.expect("git").branch, "feat/x");
+    }
+
+    #[test]
+    fn redact_blanks_a_reverted_dotenv_secret() {
+        // The measured leak: a .env value committed and then reverted still
+        // appears in `git diff HEAD` against the earlier commit.
+        let patch = "\
+diff --git a/.env b/.env
++SECRET_IN_DOTFILES=sk-live-abcdef0123456789
+";
+        let out = redact_secrets(patch);
+        assert!(!out.contains("sk-live-abcdef0123456789"), "leaked: {out}");
+        assert!(out.contains("<redacted"), "no marker: {out}");
+        // The diff structure has to survive redaction, or the patch is useless.
+        assert!(out.contains("diff --git a/.env b/.env"));
+    }
+
+    #[test]
+    fn redact_covers_common_provider_token_shapes() {
+        for token in [
+            "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA",
+            "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "github_pat_11ABCDEFG0aBcDeFgHiJkL_MnOpQrStUvWxYz0123456789",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            let out = redact_secrets(&format!("export TOK={token}\n"));
+            assert!(!out.contains(token), "leaked {token}: {out}");
+        }
+    }
+
+    #[test]
+    fn redact_leaves_ordinary_code_alone() {
+        // Over-redaction is its own failure: a diff full of <redacted> is as
+        // useless as one full of secrets.
+        let patch = "\
+diff --git a/src/retry.ts b/src/retry.ts
++const maxAttempts = 3;
++const delayMs = 250;
++if (config.timeout > 0) retry();
+";
+        assert_eq!(redact_secrets(patch), patch);
+    }
+
+    #[test]
+    fn redact_keeps_a_secret_key_name_but_drops_its_value() {
+        let out = redact_secrets("API_KEY=hunter2hunter2\n");
+        assert!(out.contains("API_KEY"), "key name lost: {out}");
+        assert!(!out.contains("hunter2hunter2"), "value leaked: {out}");
+    }
+
+    #[test]
+    fn redact_survives_a_bare_prefix_with_no_token_body() {
+        // A prefix with nothing after it must not loop forever.
+        let out = redact_secrets("value is sk- and done\nAKIA\n");
+        assert!(out.contains("sk-"));
+    }
+
+    #[test]
+    fn redact_handles_empty_input() {
+        assert_eq!(redact_secrets(""), "");
     }
 
     #[test]
