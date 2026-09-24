@@ -8,6 +8,7 @@
 pub mod discovery;
 pub mod error;
 pub mod model;
+pub mod pack;
 pub mod pipeline;
 pub mod providers;
 pub mod responses;

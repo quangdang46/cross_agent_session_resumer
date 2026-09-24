@@ -160,6 +160,35 @@ enum Command {
     /// List detected providers and their installation status.
     Providers,
 
+    /// Bundle a session for transfer to another machine.
+    ///
+    /// Packs the transcript plus its `tool-results/` and `subagents/` sidecars
+    /// into one directory, and records the cwd so the receiving machine can
+    /// place the session in the right slug. A torn tail from a concurrent write
+    /// is dropped rather than carried.
+    Pack {
+        /// Session ID to pack.
+        session_id: String,
+
+        /// Where the working tree lives on this machine. Defaults to the
+        /// session's recorded cwd.
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+
+        /// Output directory. Defaults to `~/.casr/packs/<session-id>`.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+
+        /// Include the uncommitted diff and branch so the destination is not
+        /// missing files the transcript claims to have edited.
+        #[arg(long)]
+        with_git: bool,
+
+        /// Report what would be packed without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for (bash, zsh, fish).
@@ -329,6 +358,20 @@ fn main() -> ExitCode {
             peek_lines,
         } => cmd_info(&session_id, cli.json, enrich_fs, source, peek, peek_lines),
         Command::Providers => cmd_providers(cli.json),
+        Command::Pack {
+            session_id,
+            cwd,
+            out,
+            with_git,
+            dry_run,
+        } => cmd_pack(
+            &session_id,
+            cwd.as_deref(),
+            out.as_deref(),
+            with_git,
+            dry_run,
+            cli.json,
+        ),
         Command::Completions { shell } => cmd_completions(&shell),
     };
 
@@ -1664,6 +1707,235 @@ fn cmd_info(
     }
 
     Ok(())
+}
+
+/// Bundle a session plus everything the transcript references, for transfer to
+/// another machine.
+///
+/// The transcript is not self-sufficient: measured on a real 27 MB session it
+/// referenced 4 files under `tool-results/` and 3 under `subagents/`. Copying
+/// the `.jsonl` alone loses both, and the destination would still see the
+/// session id in a picker with missing content.
+fn cmd_pack(
+    session_id: &str,
+    cwd: Option<&std::path::Path>,
+    out: Option<&std::path::Path>,
+    with_git: bool,
+    dry_run: bool,
+    json_mode: bool,
+) -> anyhow::Result<()> {
+    use casr::pack;
+
+    let root = pack::projects_root()?;
+    let slug = match cwd {
+        Some(c) => pack::slug_for_cwd(c),
+        None => find_slug_for_session(&root, session_id)?,
+    };
+    let src_dir = root.join(&slug);
+    let transcript = src_dir.join(format!("{session_id}.jsonl"));
+
+    if !transcript.exists() {
+        anyhow::bail!(
+            "no transcript for {session_id} under {}\n  \
+             The session id must resolve inside a single project slug — \
+             `claude --resume` has no global lookup, so pack needs to know which one.",
+            src_dir.display()
+        );
+    }
+
+    let cwd_path = cwd.map_or_else(|| root.join(&slug), std::path::Path::to_path_buf);
+    let session_dir = src_dir.join(session_id);
+    let sidecars = pack::collect_sidecars(&session_dir)?;
+    let src_bytes = std::fs::metadata(&transcript)?.len();
+
+    if dry_run {
+        let total: u64 = sidecars.iter().map(|s| s.bytes).sum();
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "dry_run": true,
+                    "session_id": session_id,
+                    "slug": slug,
+                    "source": transcript.display().to_string(),
+                    "transcript_bytes": src_bytes,
+                    "sidecars": sidecars.iter().map(|s| serde_json::json!({
+                        "rel": s.rel, "bytes": s.bytes
+                    })).collect::<Vec<_>>(),
+                    "total_bytes": src_bytes + total,
+                }))?
+            );
+        } else {
+            println!("Would pack {session_id} from {}", src_dir.display());
+            println!("  transcript : {}", human_bytes(src_bytes));
+            println!("  sidecars   : {}", human_bytes(total));
+            for s in &sidecars {
+                println!("      {}  {}", s.rel, human_bytes(s.bytes));
+            }
+        }
+        return Ok(());
+    }
+
+    let out_dir = out.map_or_else(
+        || {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".casr")
+                .join("packs")
+                .join(session_id)
+        },
+        std::path::Path::to_path_buf,
+    );
+    std::fs::create_dir_all(&out_dir)?;
+
+    let packed = out_dir.join(format!("{session_id}.jsonl"));
+    // Drop a torn tail: the agent may be mid-append as we read.
+    let offset = pack::copy_complete_lines(&transcript, &packed)?;
+
+    for s in &sidecars {
+        let from = session_dir.join(&s.rel);
+        let to = out_dir.join("payload").join(&s.rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&from, &to)?;
+    }
+
+    let git = if with_git {
+        capture_git_state(&cwd_path)
+    } else {
+        None
+    };
+
+    let bundle = pack::Bundle {
+        version: pack::BUNDLE_VERSION,
+        provider: "claude-code".into(),
+        session_id: session_id.into(),
+        cwd: cwd_path,
+        sidecars,
+        transcript_offset: offset,
+        transcript_bytes: src_bytes,
+        git,
+    };
+    let manifest = out_dir.join("bundle.json");
+    std::fs::write(&manifest, serde_json::to_string_pretty(&bundle)?)?;
+
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "session_id": session_id,
+                "out": out_dir.display().to_string(),
+                "manifest": manifest.display().to_string(),
+                "transcript_bytes": packed.metadata()?.len(),
+                "transcript_offset": offset,
+                "sidecars": bundle.sidecars.len(),
+                "slug": slug,
+            }))?
+        );
+    } else {
+        println!("{}", "Packed".green().bold());
+        println!("  session   : {session_id}");
+        println!("  slug      : {slug}");
+        println!(
+            "  transcript: {} (offset {offset})",
+            human_bytes(packed.metadata()?.len())
+        );
+        println!("  sidecars  : {}", bundle.sidecars.len());
+        println!(
+            "  git       : {}",
+            if bundle.git.is_some() {
+                "captured"
+            } else {
+                "skipped"
+            }
+        );
+        println!("  out       : {}", out_dir.display());
+    }
+    Ok(())
+}
+
+/// Locate which project slug holds `session_id`.
+///
+/// `claude --resume` resolves a session only inside the slug of the current
+/// cwd, so pack must pick the slug deliberately rather than assume one.
+fn find_slug_for_session(root: &std::path::Path, session_id: &str) -> anyhow::Result<String> {
+    let needle = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(root)? {
+        let dir = entry?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        if dir.join(&needle).exists() {
+            return Ok(dir
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().to_string()));
+        }
+    }
+    anyhow::bail!(
+        "session {session_id} not found under {}\n  \
+         Run 'casr list --all' to see where it lives, then pass --cwd.",
+        root.display()
+    );
+}
+
+/// Capture branch, head, and the uncommitted diff.
+///
+/// A bundle without this restores a session whose transcript claims to have
+/// edited files the destination does not have. `git diff` is used rather than a
+/// file list because a patch is portable: it carries its own paths.
+fn capture_git_state(cwd: &std::path::Path) -> Option<casr::pack::GitState> {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    };
+
+    run(&["rev-parse", "--is-inside-work-tree"])?;
+
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    let head = run(&["rev-parse", "HEAD"]).unwrap_or_default();
+    let head = head.trim().to_string();
+    let dirty_patch = run(&["diff", "HEAD"]).unwrap_or_default();
+
+    let mut untracked = run(&["ls-files", "--others", "--exclude-standard"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    untracked.truncate(200);
+
+    Some(casr::pack::GitState {
+        branch: branch.to_string(),
+        head,
+        dirty_patch,
+        untracked,
+    })
+}
+
+fn human_bytes(n: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    const KB: u64 = 1024;
+    if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
 }
 
 fn cmd_providers(json_mode: bool) -> anyhow::Result<()> {
