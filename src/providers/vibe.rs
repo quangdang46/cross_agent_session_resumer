@@ -268,11 +268,10 @@ impl Provider for Vibe {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let session_id = if session.session_id.is_empty() {
-            format!("casr-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S"))
-        } else {
-            session.session_id.clone()
-        };
+        // The id becomes a directory name under the Vibe session root; it must
+        // come from the sanitized target/source id — never the raw (untrusted)
+        // `session.session_id`, which could contain `..` or separators.
+        let session_id = crate::providers::resolve_write_session_id(opts, session);
 
         let target_dir = Self::home_dir().join(&session_id);
         let target_path = target_dir.join("messages.jsonl");

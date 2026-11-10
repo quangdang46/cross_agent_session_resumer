@@ -44,6 +44,30 @@ pub struct WriteOptions {
     pub target_session_id: Option<String>,
 }
 
+/// Resolve the session id a file-backed writer should use.
+///
+/// Prefers the pipeline-supplied deterministic [`WriteOptions::target_session_id`]
+/// (which makes re-running the same conversion idempotent), then falls back to
+/// the source session id, and finally to a timestamped `casr-` id when neither
+/// is usable. Every candidate passes through
+/// [`crate::discovery::sanitize_session_id_for_path`] so untrusted ids from
+/// source files cannot escape the provider's session root via `..`, separators,
+/// or NUL bytes.
+pub(crate) fn resolve_write_session_id(opts: &WriteOptions, session: &CanonicalSession) -> String {
+    if let Some(id) = opts
+        .target_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return crate::discovery::sanitize_session_id_for_path(id);
+    }
+    if !session.session_id.trim().is_empty() {
+        return crate::discovery::sanitize_session_id_for_path(&session.session_id);
+    }
+    format!("casr-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S"))
+}
+
 /// Describes the files produced by a successful write operation.
 #[derive(Debug, Clone)]
 pub struct WrittenSession {
@@ -104,5 +128,65 @@ pub trait Provider: Send + Sync {
     /// tells the caller to fall back to directory walking + `read_session`.
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::CanonicalSession;
+    use serde_json::json;
+
+    fn session_with_id(id: &str) -> CanonicalSession {
+        CanonicalSession {
+            session_id: id.to_string(),
+            provider_slug: "test".to_string(),
+            workspace: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            messages: vec![],
+            metadata: json!({}),
+            source_path: std::path::PathBuf::from("/tmp/x"),
+            model_name: None,
+        }
+    }
+
+    #[test]
+    fn write_session_id_prefers_target_override() {
+        let opts = WriteOptions {
+            force: false,
+            target_session_id: Some("deterministic-id".to_string()),
+        };
+        let id = resolve_write_session_id(&opts, &session_with_id("source-id"));
+        assert_eq!(id, "deterministic-id");
+    }
+
+    #[test]
+    fn write_session_id_sanitizes_untrusted_source_id() {
+        let opts = WriteOptions {
+            force: false,
+            target_session_id: None,
+        };
+        for bad in ["../escape", "a/../../b", "..", "/abs/path", "a\\b"] {
+            let id = resolve_write_session_id(&opts, &session_with_id(bad));
+            assert!(
+                !id.contains('/') && !id.contains('\\'),
+                "unsanitized separator for {bad:?} -> {id:?}"
+            );
+            assert_ne!(id, "..");
+            assert!(!id.is_empty());
+        }
+    }
+
+    #[test]
+    fn write_session_id_target_override_is_sanitized_too() {
+        let opts = WriteOptions {
+            force: false,
+            target_session_id: Some("../pwned".to_string()),
+        };
+        let id = resolve_write_session_id(&opts, &session_with_id("anything"));
+        assert_eq!(id, "..-pwned");
+        assert!(!id.contains('/'));
     }
 }

@@ -99,6 +99,34 @@ pub fn validate_session_id(session_id: &str) -> Result<(), CasrError> {
     Ok(())
 }
 
+/// Sanitize a session id for use as a single filesystem path component.
+///
+/// Write-side counterpart to [`validate_session_id`]: source session ids come
+/// from untrusted provider files, so writers must never join them onto target
+/// roots verbatim. Path separators (`/`, `\`), NUL and other control bytes are
+/// mapped to `-`, and results that would still alias a directory entry
+/// (empty, or composed solely of `.` characters such as `.`/`..`/`...`,
+/// including trailing-whitespace variants Windows would collapse) fall back
+/// to a fixed safe name. The returned string is always safe to use as ONE
+/// path component — a filename stem or a single directory name.
+pub fn sanitize_session_id_for_path(session_id: &str) -> String {
+    let mut out = String::with_capacity(session_id.len());
+    for ch in session_id.chars() {
+        if ch == '/' || ch == '\\' || ch == '\0' || ch.is_control() {
+            out.push('-');
+        } else {
+            out.push(ch);
+        }
+    }
+    // Trailing whitespace/dots are stripped by Windows path handling and can
+    // turn e.g. `".. "` back into a traversal component — trim defensively.
+    let trimmed = out.trim_end_matches(|c| c == '.' || char::is_whitespace(c));
+    if trimmed.is_empty() || trimmed.chars().all(|c| c == '.') {
+        return "casr-session".to_string();
+    }
+    trimmed.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Resolved session
 // ---------------------------------------------------------------------------
@@ -884,6 +912,52 @@ mod tests {
         ] {
             assert!(validate_session_id(ok).is_ok(), "expected ok for {ok:?}");
         }
+    }
+
+    #[test]
+    fn sanitize_session_id_for_path_neutralizes_traversal() {
+        use super::sanitize_session_id_for_path;
+
+        // Every result must be a single safe path component: no separators,
+        // no NUL/control bytes, and never a bare dot-run that aliases `.`/`..`.
+        for bad in [
+            "../escape",
+            "a/../../b",
+            "..",
+            ".",
+            "...",
+            "/etc/passwd",
+            "C:\\windows\\system32",
+            "session\0id",
+            "line\nbreak",
+            ".. ",
+            "  ..  ",
+            "",
+            "   ",
+        ] {
+            let out = sanitize_session_id_for_path(bad);
+            assert!(!out.is_empty(), "empty result for {bad:?}");
+            assert!(
+                !out.contains('/') && !out.contains('\\') && !out.contains('\0'),
+                "separator/NUL survived for {bad:?} -> {out:?}"
+            );
+            assert!(
+                !out.chars().all(|c| c == '.'),
+                "dot-run alias for {bad:?} -> {out:?}"
+            );
+            // A sanitized id must never equal a traversal component.
+            assert_ne!(out, "..");
+            assert_ne!(out, ".");
+        }
+
+        // Benign ids pass through unchanged.
+        assert_eq!(
+            sanitize_session_id_for_path("550e8400-e29b-41d4-a716-446655440000"),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        // Separators become dashes but the rest of the id is preserved.
+        assert_eq!(sanitize_session_id_for_path("a/b"), "a-b");
+        assert_eq!(sanitize_session_id_for_path("2026/02/06/rollout-1"), "2026-02-06-rollout-1");
     }
 
     #[test]

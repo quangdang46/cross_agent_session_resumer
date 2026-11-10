@@ -451,11 +451,9 @@ impl Provider for Factory {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let session_id = if session.session_id.is_empty() {
-            format!("casr-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S"))
-        } else {
-            session.session_id.clone()
-        };
+        // The id becomes a filename stem; sanitize so untrusted source ids
+        // cannot traverse out of the workspace-slug directory.
+        let session_id = crate::providers::resolve_write_session_id(opts, session);
 
         let workspace_slug = session
             .workspace
