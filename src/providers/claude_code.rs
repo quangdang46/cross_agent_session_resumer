@@ -36,6 +36,13 @@ pub struct ClaudeCode;
 /// character is replaced by `-` while alphanumeric characters (including case)
 /// are preserved.
 ///
+/// KNOWN LIMITATION (inherent to the on-disk format): the key replaces every
+/// non-alphanumeric character with `-`, so distinct workspaces can collide —
+/// e.g. `/a-b` and `/a/b` both map to `-a-b`. Claude Code itself uses this
+/// same lossy encoding, so `casr` mirrors it rather than inventing a
+/// divergent scheme; sessions from colliding workspaces share a bucket and
+/// are distinguished only by their session files inside it.
+///
 /// Examples:
 /// - `/data/projects/cross_agent_session_resumer` -> `-data-projects-cross-agent-session-resumer`
 /// - `/data/projects/jeffreys-skills.md` -> `-data-projects-jeffreys-skills-md`

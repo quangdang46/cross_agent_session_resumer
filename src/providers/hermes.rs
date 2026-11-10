@@ -1671,7 +1671,9 @@ mod tests {
             target_session_id: Some("dup-force-test".to_string()),
         };
         Hermes.write_session(&session, &opts).expect("first write");
-        let written = Hermes.write_session(&session, &opts).expect("forced rewrite");
+        let written = Hermes
+            .write_session(&session, &opts)
+            .expect("forced rewrite");
 
         let readback = Hermes.read_session(&written.paths[0]).expect("readback");
         assert_eq!(
@@ -1722,11 +1724,11 @@ mod tests {
         assert_eq!(second.paths, first.paths);
 
         // Simulate verification failure: roll back.
-        Hermes
-            .rollback_written(&second)
-            .expect("rollback_written");
+        Hermes.rollback_written(&second).expect("rollback_written");
 
-        let restored = Hermes.read_session(&first.paths[0]).expect("readback after rollback");
+        let restored = Hermes
+            .read_session(&first.paths[0])
+            .expect("readback after rollback");
         assert_eq!(restored.messages.len(), 1);
         assert_eq!(restored.messages[0].content, "original");
     }
@@ -1754,9 +1756,7 @@ mod tests {
                 },
             )
             .expect("write");
-        Hermes
-            .rollback_written(&written)
-            .expect("rollback");
+        Hermes.rollback_written(&written).expect("rollback");
         let err = Hermes.read_session(&written.paths[0]).unwrap_err();
         assert!(format!("{err}").contains("not found"));
     }

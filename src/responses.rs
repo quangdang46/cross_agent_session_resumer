@@ -101,6 +101,22 @@ pub struct InfoResponse {
 // `providers --json`
 // ---------------------------------------------------------------------------
 
+/// Versioned envelope wrapping `providers --json` output.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProvidersEnvelope {
+    pub schema_version: u32,
+    pub providers: Vec<ProviderInfo>,
+}
+
+impl ProvidersEnvelope {
+    pub fn new(providers: Vec<ProviderInfo>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            providers,
+        }
+    }
+}
+
 /// A single provider entry in `providers --json`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderInfo {
@@ -110,6 +126,9 @@ pub struct ProviderInfo {
     pub installed: bool,
     pub version: Option<String>,
     pub evidence: Vec<String>,
+    /// Whether this provider can be a conversion target (`false` for
+    /// read/resume-only providers such as Antigravity).
+    pub target_capable: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +316,7 @@ mod tests {
             installed: true,
             version: Some("1.0".to_string()),
             evidence: vec!["found binary".to_string()],
+            target_capable: true,
         };
         let json = serde_json::to_value(&pi).unwrap();
         assert_eq!(json["name"], "Claude Code");

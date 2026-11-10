@@ -117,6 +117,15 @@ pub trait Provider: Send + Sync {
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession>;
 
+    /// Whether this provider can act as a conversion *target*.
+    ///
+    /// Read/resume-only providers (e.g. Antigravity) return `false`; their
+    /// [`Provider::write_session`] refuses to synthesize a resumable session.
+    /// Surfaced in `providers --json` as `target_capable`.
+    fn target_capable(&self) -> bool {
+        true
+    }
+
     /// Build the shell command to resume a session with this provider.
     fn resume_command(&self, session_id: &str) -> String;
 

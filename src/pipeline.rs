@@ -743,19 +743,29 @@ fn estimate_message_tokens(m: &CanonicalMessage) -> usize {
 
 /// Trim a string to ~`max` chars, keeping head and tail with an elision marker.
 /// Returns `None` if no truncation was needed.
+///
+/// Char-boundary safe and allocation-light: two `char_indices` passes instead
+/// of collecting the whole string into a `Vec<char>`.
 fn elide_middle(s: &str, max: usize) -> Option<String> {
     if max == 0 {
         return None;
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
+    let total = s.chars().count();
+    if total <= max {
         return None;
     }
     let head_len = max.saturating_mul(2) / 3;
     let tail_len = max.saturating_sub(head_len);
-    let omitted = chars.len() - head_len - tail_len;
-    let head: String = chars[..head_len].iter().collect();
-    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    let omitted = total - head_len - tail_len;
+    // Byte offset just past the `head_len`-th char (or end of string).
+    let head_end = s.char_indices().nth(head_len).map_or(s.len(), |(i, _)| i);
+    // Byte offset of the `tail_len`-th char from the end.
+    let tail_start = s
+        .char_indices()
+        .nth(total - tail_len)
+        .map_or(head_end, |(i, _)| i);
+    let head = &s[..head_end];
+    let tail = &s[tail_start..];
     Some(format!("{head}\n…[casr: {omitted} chars elided]…\n{tail}"))
 }
 
@@ -1408,6 +1418,11 @@ pub fn atomic_write(
     };
 
     // 3. Write to temp file in the same directory.
+    //
+    // Best-effort sweep of `.casr-tmp-*` siblings left behind by crashed
+    // runs. Only files older than an hour are removed so a concurrent casr
+    // process's in-flight temp file is never touched.
+    sweep_stale_temp_files(target_path.parent().unwrap_or(Path::new(".")));
     let temp_name = format!(".casr-tmp-{}", uuid::Uuid::new_v4().as_hyphenated());
     let temp_path = target_path
         .parent()
@@ -1494,9 +1509,41 @@ pub fn atomic_write(
     })
 }
 
+/// Remove `.casr-tmp-*` files older than one hour in `dir`.
+///
+/// `atomic_write` leaves these behind only when the process dies between temp
+/// creation and rename; the age guard keeps a concurrent writer's live temp
+/// file safe. Best-effort: every error is ignored.
+fn sweep_stale_temp_files(dir: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".casr-tmp-")
+        {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age > MAX_AGE {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Restore a backup after a verification failure.
 ///
 /// Removes the broken target and renames the backup back into place.
+#[cfg(test)]
 pub fn restore_backup(outcome: &AtomicWriteOutcome, provider_slug: &str) -> Result<(), CasrError> {
     if let Some(ref bak) = outcome.backup_path {
         warn!(

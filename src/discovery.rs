@@ -957,7 +957,10 @@ mod tests {
         );
         // Separators become dashes but the rest of the id is preserved.
         assert_eq!(sanitize_session_id_for_path("a/b"), "a-b");
-        assert_eq!(sanitize_session_id_for_path("2026/02/06/rollout-1"), "2026-02-06-rollout-1");
+        assert_eq!(
+            sanitize_session_id_for_path("2026/02/06/rollout-1"),
+            "2026-02-06-rollout-1"
+        );
     }
 
     #[test]

@@ -224,13 +224,33 @@ fn assert_exact_keys(obj: &serde_json::Value, expected: &[&str], ctx: &str) {
 // ---------------------------------------------------------------------------
 // Contract: `providers --json`
 // ---------------------------------------------------------------------------
-// Expected shape: Array of {name, slug, alias, installed, version, evidence}
+// Expected shape: {schema_version, providers: [{name, slug, alias, installed,
+// version, evidence, target_capable}]}
+
+fn providers_array(parsed: &serde_json::Value) -> &Vec<serde_json::Value> {
+    assert_eq!(
+        parsed["schema_version"].as_u64(),
+        Some(2),
+        "providers envelope should carry schema_version 2"
+    );
+    parsed["providers"]
+        .as_array()
+        .expect("providers --json should be a versioned envelope with a providers array")
+}
 
 fn assert_provider_object(obj: &serde_json::Value, idx: usize) {
     let ctx = format!("providers[{idx}]");
     assert_exact_keys(
         obj,
-        &["name", "slug", "alias", "installed", "version", "evidence"],
+        &[
+            "name",
+            "slug",
+            "alias",
+            "installed",
+            "version",
+            "evidence",
+            "target_capable",
+        ],
         &ctx,
     );
     assert_string(&obj["name"], "name", &ctx);
@@ -239,6 +259,7 @@ fn assert_provider_object(obj: &serde_json::Value, idx: usize) {
     assert_bool(&obj["installed"], "installed", &ctx);
     assert_string_or_null(&obj["version"], "version", &ctx);
     assert_array(&obj["evidence"], "evidence", &ctx);
+    assert_bool(&obj["target_capable"], "target_capable", &ctx);
 
     // Evidence items are all strings.
     for (i, ev) in obj["evidence"].as_array().unwrap().iter().enumerate() {
@@ -259,9 +280,7 @@ fn contract_providers_json_shape() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("Invalid JSON from providers: {e}\nOutput: {stdout}"));
 
-    let arr = parsed
-        .as_array()
-        .expect("providers --json should be an array");
+    let arr = providers_array(&parsed);
     assert_eq!(
         arr.len(),
         21,
@@ -271,6 +290,17 @@ fn contract_providers_json_shape() {
     for (i, item) in arr.iter().enumerate() {
         assert_provider_object(item, i);
     }
+
+    // Antigravity is read/resume-only and must be flagged non-target-capable.
+    let agy = arr
+        .iter()
+        .find(|p| p["slug"].as_str() == Some("antigravity"))
+        .expect("antigravity provider entry");
+    assert_eq!(
+        agy["target_capable"].as_bool(),
+        Some(false),
+        "antigravity should have target_capable=false"
+    );
 }
 
 #[test]
@@ -283,9 +313,7 @@ fn contract_providers_known_slugs() {
 
     let parsed: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
-    let slugs: Vec<&str> = parsed
-        .as_array()
-        .unwrap()
+    let slugs: Vec<&str> = providers_array(&parsed)
         .iter()
         .map(|p| p["slug"].as_str().unwrap())
         .collect();
@@ -321,9 +349,7 @@ fn contract_providers_aliases_match_slugs() {
 
     let parsed: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
-    let alias_map: Vec<(&str, &str)> = parsed
-        .as_array()
-        .unwrap()
+    let alias_map: Vec<(&str, &str)> = providers_array(&parsed)
         .iter()
         .map(|p| (p["slug"].as_str().unwrap(), p["alias"].as_str().unwrap()))
         .collect();

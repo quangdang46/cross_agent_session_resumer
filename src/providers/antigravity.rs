@@ -338,6 +338,10 @@ impl Provider for Antigravity {
         ))
     }
 
+    fn target_capable(&self) -> bool {
+        false
+    }
+
     fn resume_command(&self, session_id: &str) -> String {
         format!("agy --conversation {session_id} --model \"{AGY_REQUIRED_MODEL}\"")
     }

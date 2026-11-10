@@ -1719,9 +1719,13 @@ fn cmd_providers(json_mode: bool) -> anyhow::Result<()> {
                 installed: det.installed,
                 version: det.version.clone(),
                 evidence: det.evidence.clone(),
+                target_capable: p.target_capable(),
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&providers)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&responses::ProvidersEnvelope::new(providers))?
+        );
     } else {
         println!("{}\n", "Detected Providers".bold());
         for (provider, detection) in &results {

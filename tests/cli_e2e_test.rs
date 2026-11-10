@@ -232,7 +232,15 @@ fn cli_providers_json_is_valid() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("providers --json should emit valid JSON");
-    assert!(parsed.is_array(), "providers JSON should be an array");
+    assert!(
+        parsed.is_object(),
+        "providers JSON should be an envelope object"
+    );
+    assert!(
+        parsed["providers"].is_array(),
+        "providers envelope should contain a providers array"
+    );
+    assert_eq!(parsed["schema_version"].as_u64(), Some(2));
 }
 
 // ---------------------------------------------------------------------------

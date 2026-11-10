@@ -152,6 +152,10 @@ impl Provider for Codex {
     }
 
     fn owns_session(&self, session_id: &str) -> Option<PathBuf> {
+        // An empty id would make `ends_with("")` match every rollout file.
+        if session_id.trim().is_empty() {
+            return None;
+        }
         let sessions_dir = Self::sessions_dir()?;
         if !sessions_dir.is_dir() {
             return None;
