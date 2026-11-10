@@ -217,6 +217,14 @@ impl Provider for ChatGpt {
         let root: serde_json::Value = serde_json::from_reader(reader)
             .with_context(|| format!("failed to parse JSON {}", path.display()))?;
 
+        // Files written by casr carry `casr_converted`; for those, system-role
+        // and empty-content nodes are intentional round-trip payloads rather
+        // than the noise the reader normally filters out of real ChatGPT data.
+        let is_casr_import = root
+            .get("casr_converted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // Session ID: prefer "id", then "conversation_id", then filename stem.
         let session_id = root
             .get("id")
@@ -275,8 +283,11 @@ impl Provider for ChatGpt {
                     .and_then(|v| v.as_str())
                     .unwrap_or("assistant");
 
-                // Skip system messages.
-                if role_str == "system" {
+                // Skip system messages (real ChatGPT exports embed the system
+                // prompt here). casr-written files keep them: the writer only
+                // emits roles the reader can map back, and verification
+                // requires every written message to survive read-back.
+                if role_str == "system" && !is_casr_import {
                     continue;
                 }
 
@@ -299,7 +310,7 @@ impl Provider for ChatGpt {
                     continue;
                 };
 
-                if text.trim().is_empty() {
+                if text.trim().is_empty() && !is_casr_import {
                     continue;
                 }
 
@@ -339,7 +350,7 @@ impl Provider for ChatGpt {
                     .and_then(|v| v.as_str())
                     .unwrap_or("assistant");
 
-                if role_str == "system" {
+                if role_str == "system" && !is_casr_import {
                     continue;
                 }
 
@@ -347,7 +358,7 @@ impl Provider for ChatGpt {
 
                 let text = msg.get("content").map(flatten_content).unwrap_or_default();
 
-                if text.trim().is_empty() {
+                if text.trim().is_empty() && !is_casr_import {
                     continue;
                 }
 
@@ -455,8 +466,10 @@ impl Provider for ChatGpt {
         // fall back to node-id sort, which is random (UUID v4). Synthesize a
         // monotonically-increasing +1ms timestamp so messages stay in write
         // order when the source format (e.g. Cline) does not record per-message
-        // timestamps.
+        // timestamps. Timestamps are additionally clamped to be strictly
+        // increasing so equal source timestamps can't reorder on read-back.
         let mut synthetic_ts_secs = create_time;
+        let mut last_emitted_ts_secs = f64::NEG_INFINITY;
         for msg in &session.messages {
             let node_id = uuid::Uuid::new_v4().to_string();
             let chatgpt_role = match msg.role {
@@ -467,7 +480,7 @@ impl Provider for ChatGpt {
                 MessageRole::Other(ref s) => s.as_str(),
             };
 
-            let msg_ts_secs = match msg.timestamp {
+            let mut msg_ts_secs = match msg.timestamp {
                 Some(ms) => ms as f64 / 1000.0,
                 None => {
                     let t = synthetic_ts_secs;
@@ -475,6 +488,10 @@ impl Provider for ChatGpt {
                     t
                 }
             };
+            if msg_ts_secs <= last_emitted_ts_secs {
+                msg_ts_secs = last_emitted_ts_secs + 0.001;
+            }
+            last_emitted_ts_secs = msg_ts_secs;
 
             let mut message_obj = serde_json::json!({
                 "author": {"role": chatgpt_role},
@@ -514,6 +531,10 @@ impl Provider for ChatGpt {
             "create_time": create_time,
             "update_time": update_time,
             "mapping": mapping,
+            // Marks this file as a casr conversion so the reader preserves
+            // system-role and empty-content nodes instead of filtering them
+            // as ChatGPT-export noise.
+            "casr_converted": true,
         });
 
         let content_bytes = serde_json::to_string_pretty(&root)?.into_bytes();
@@ -709,6 +730,59 @@ mod tests {
 
         assert_eq!(session.messages[0].content, "First");
         assert_eq!(session.messages[1].content, "Second");
+    }
+
+    #[test]
+    fn reader_casr_converted_preserves_system_and_empty_messages() {
+        // Regression (bd-dtb): the writer emits every canonical message —
+        // including System-role and empty-content ones — but the reader used
+        // to drop them, causing "message count mismatch" verification failures.
+        // Files marked `casr_converted` keep those nodes on read-back.
+        let session = read_chatgpt_json(
+            &json!({
+                "id": "casr-conv",
+                "casr_converted": true,
+                "mapping": {
+                    "sys": {
+                        "message": {
+                            "author": {"role": "system"},
+                            "content": {"parts": ["Synthetic context."]},
+                            "create_time": 1700000000.0
+                        }
+                    },
+                    "user": {
+                        "message": {
+                            "author": {"role": "user"},
+                            "content": {"parts": ["Hi!"]},
+                            "create_time": 1700000001.0
+                        }
+                    },
+                    "tool": {
+                        "message": {
+                            "author": {"role": "tool"},
+                            "content": {"parts": ["[Tool Output] done"]},
+                            "create_time": 1700000002.0
+                        }
+                    },
+                    "empty": {
+                        "message": {
+                            "author": {"role": "assistant"},
+                            "content": {"parts": [""]},
+                            "create_time": 1700000003.0
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        );
+
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[0].role, MessageRole::System);
+        assert_eq!(session.messages[0].content, "Synthetic context.");
+        assert_eq!(session.messages[1].role, MessageRole::User);
+        assert_eq!(session.messages[2].role, MessageRole::Tool);
+        assert_eq!(session.messages[3].role, MessageRole::Assistant);
+        assert_eq!(session.messages[3].content, "");
     }
 
     #[test]

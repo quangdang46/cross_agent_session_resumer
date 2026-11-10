@@ -2589,3 +2589,106 @@ fn writer_piagent_tool_role_normalized() {
         "PiAgent should normalize Tool role to 'toolResult'"
     );
 }
+
+// ===========================================================================
+// Regression tests for read-back verification bugs
+// ===========================================================================
+
+#[test]
+fn writer_amp_roundtrip_assistant_with_tool_use() {
+    // Regression (bd-s3u): an assistant message carrying text + tool_calls
+    // used to read back with "[Tool: name]" lines folded into content,
+    // failing "message content mismatch" verification.
+    let _lock = AMP_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("AMP_HOME", tmp.path());
+
+    let mut session = simple_session();
+    session.messages[1].tool_calls = vec![casr::model::ToolCall {
+        id: Some("toolu_1".to_string()),
+        name: "Read".to_string(),
+        arguments: serde_json::json!({"path": "src/lib.rs"}),
+    }];
+    session.messages[1].tool_results = vec![casr::model::ToolResult {
+        call_id: Some("toolu_1".to_string()),
+        content: "file body".to_string(),
+        is_error: false,
+    }];
+
+    let written = Amp
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
+        .expect("Amp write_session should succeed");
+
+    let readback = Amp
+        .read_session(&written.paths[0])
+        .expect("Amp read_session should parse written output");
+
+    assert_eq!(readback.messages.len(), session.messages.len());
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(orig.role, rb.role, "Amp tool roundtrip msg {i}: role");
+        assert_eq!(
+            orig.content, rb.content,
+            "Amp tool roundtrip msg {i}: content"
+        );
+    }
+    assert_eq!(readback.messages[1].tool_calls.len(), 1);
+    assert_eq!(readback.messages[1].tool_results.len(), 1);
+}
+
+#[test]
+fn writer_chatgpt_roundtrip_preserves_system_and_tool_roles() {
+    // Regression (bd-dtb): the reader used to drop system-role and
+    // empty-content nodes, causing "message count mismatch" on sessions
+    // containing them. casr-written files are now marked and round-trip
+    // every message.
+    let _lock = CHATGPT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
+
+    let mut session = simple_session();
+    session.messages[1].role = MessageRole::System;
+    session.messages[2].role = MessageRole::Tool;
+
+    let written = ChatGpt
+        .write_session(
+            &session,
+            &WriteOptions {
+                force: false,
+                target_session_id: None,
+            },
+        )
+        .expect("ChatGPT write_session should succeed");
+
+    let readback = ChatGpt
+        .read_session(&written.paths[0])
+        .expect("ChatGPT read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "ChatGPT roundtrip with System/Tool roles: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(orig.role, rb.role, "ChatGPT role roundtrip msg {i}");
+        assert_eq!(
+            orig.content, rb.content,
+            "ChatGPT content roundtrip msg {i}"
+        );
+    }
+}
