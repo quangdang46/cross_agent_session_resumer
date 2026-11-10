@@ -314,12 +314,6 @@ impl Provider for ClaudeCode {
             let tool_calls = extract_tool_calls(content_value);
             let tool_results = extract_tool_results(content_value);
 
-            // Skip messages that have neither text nor tool payloads.
-            if content.trim().is_empty() && tool_calls.is_empty() && tool_results.is_empty() {
-                trace!(line = line_num, "skipping empty content message");
-                continue;
-            }
-
             // Extract timestamp.
             let ts_value = entry
                 .get("timestamp")
@@ -337,6 +331,31 @@ impl Provider for ClaudeCode {
                 .pointer("/message/model")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+
+            // Thinking blocks are the model's hidden reasoning. The text
+            // extractor ignores them, so surface each as a standalone
+            // `author: "reasoning"` message (same convention as the Codex
+            // reader's `agent_reasoning` events) — `--keep-reasoning` can then
+            // retain them while the default context budget drops them.
+            for thinking in claude_extract_thinking_texts(content_value) {
+                messages.push(CanonicalMessage {
+                    idx: 0,
+                    role: MessageRole::Assistant,
+                    content: thinking,
+                    timestamp,
+                    author: Some("reasoning".to_string()),
+                    tool_calls: vec![],
+                    tool_results: vec![],
+                    extra: serde_json::Value::Null,
+                });
+            }
+
+            // Skip messages that have neither text nor tool payloads.
+            if content.trim().is_empty() && tool_calls.is_empty() && tool_results.is_empty() {
+                trace!(line = line_num, "skipping empty content message");
+                continue;
+            }
+
             if let Some(ref m) = model {
                 *model_counts.entry(m.clone()).or_insert(0) += 1;
             }
@@ -465,6 +484,29 @@ impl Provider for ClaudeCode {
             "writing Claude Code session"
         );
 
+        // Prefer real values recorded in the source session's metadata
+        // (the Claude reader preserves `gitBranch`/`claudeVersion` there);
+        // fall back to sentinels only when the source recorded nothing.
+        let git_branch = session
+            .metadata
+            .get("gitBranch")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("main");
+        let claude_version = session
+            .metadata
+            .get("claudeVersion")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("casr");
+        // Model fallback chain: per-message author → session model → any
+        // model-ish key in source metadata → "unknown".
+        let session_model = session
+            .model_name
+            .as_deref()
+            .or_else(|| session.metadata.get("model").and_then(|v| v.as_str()))
+            .or_else(|| session.metadata.get("model_slug").and_then(|v| v.as_str()));
+
         // Build JSONL content: one line per message.
         let mut lines: Vec<String> = Vec::with_capacity(session.messages.len());
         let mut prev_uuid: Option<String> = None;
@@ -481,7 +523,7 @@ impl Provider for ClaudeCode {
                 .unwrap_or_else(|| now_iso.clone());
 
             let entry_type = claude_entry_type(&msg.role);
-            let inner_msg = build_inner_message(msg, session.model_name.as_deref(), entry_type);
+            let inner_msg = build_inner_message(msg, session_model, entry_type);
 
             // Build the full JSONL entry.
             let parent_uuid_val = match &prev_uuid {
@@ -494,8 +536,8 @@ impl Provider for ClaudeCode {
                 "userType": "external",
                 "cwd": workspace_str.to_string_lossy(),
                 "sessionId": target_session_id,
-                "version": "casr",
-                "gitBranch": "main",
+                "version": claude_version,
+                "gitBranch": git_branch,
                 "type": entry_type,
                 "message": inner_msg,
                 "uuid": entry_uuid,
@@ -766,6 +808,31 @@ fn claude_session_id_hint(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract `thinking` block texts from Claude content blocks.
+///
+/// The text extractor deliberately ignores `thinking` blocks; they are
+/// surfaced separately as `author: "reasoning"` canonical messages so
+/// `--keep-reasoning` has something to retain.
+fn claude_extract_thinking_texts(content: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(serde_json::Value::Array(blocks)) = content else {
+        return vec![];
+    };
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let obj = block.as_object()?;
+            if obj.get("type")?.as_str()? != "thinking" {
+                return None;
+            }
+            obj.get("thinking")
+                .or_else(|| obj.get("text"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .filter(|t| !t.trim().is_empty())
+        .collect()
 }
 
 fn claude_extract_text_content(content: Option<&serde_json::Value>) -> String {
@@ -1271,5 +1338,35 @@ not json at all
         let inner = build_inner_message(&msg, Some("claude-3-opus"), "assistant");
         // Explicit author on message should override session model name.
         assert_eq!(inner["model"], "claude-4-opus");
+    }
+
+    #[test]
+    fn reader_thinking_blocks_become_reasoning_messages() {
+        // Regression (bd-fidelity-batch-ce2a): `thinking` content blocks used
+        // to be dropped silently at read time, making --keep-reasoning a
+        // no-op for Claude sources. They now surface as author="reasoning"
+        // messages (the Codex agent_reasoning convention).
+        use super::ClaudeCode;
+        use crate::providers::Provider;
+        use std::io::Write as _;
+
+        let jsonl = concat!(
+            r#"{"type":"user","sessionId":"s1","uuid":"u1","cwd":"/tmp","timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"s1","uuid":"u2","cwd":"/tmp","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"thinking","thinking":"let me think"},{"type":"text","text":"answer"}]}}"#,
+            "\n"
+        );
+        let mut tmp = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let session = ClaudeCode.read_session(tmp.path()).unwrap();
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].author.as_deref(), Some("reasoning"));
+        assert_eq!(session.messages[1].content, "let me think");
+        assert_eq!(session.messages[2].content, "answer");
+        assert_eq!(session.messages[2].author.as_deref(), Some("claude-x"));
     }
 }

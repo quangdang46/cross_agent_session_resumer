@@ -424,7 +424,29 @@ but resume may fail until the CLI is installed.",
         );
 
         // 3. Read source session into canonical IR.
-        let mut canonical = resolved.provider.read_session(&resolved.path)?;
+        //
+        // Normalize read failures into `SessionReadError` so the same failure
+        // class (unreadable/malformed/empty session file) surfaces one error
+        // type regardless of which resolution path produced it — previously a
+        // file under a provider root could yield `InternalError` (raw IO) or
+        // `ValidationError` (zero messages) while the `--source` probing path
+        // yielded `SessionReadError`.
+        let mut canonical = resolved
+            .provider
+            .read_session(&resolved.path)
+            .map_err(|e| CasrError::SessionReadError {
+                path: resolved.path.clone(),
+                provider: resolved.provider.slug().to_string(),
+                detail: format!("{e:#}"),
+            })?;
+        if canonical.messages.is_empty() {
+            return Err(CasrError::SessionReadError {
+                path: resolved.path.clone(),
+                provider: resolved.provider.slug().to_string(),
+                detail: "session file contains no readable messages".to_string(),
+            }
+            .into());
+        }
         debug!(
             messages = canonical.messages.len(),
             session_id = canonical.session_id,
@@ -508,19 +530,9 @@ session unless your cwd matches the written workspace."
             ));
         }
 
-        // 6. Dry-run short-circuit.
-        if opts.dry_run {
-            info!("dry run — skipping write and verify");
-            return Ok(ConversionResult {
-                source_provider: resolved.provider.slug().to_string(),
-                target_provider: target_provider.slug().to_string(),
-                canonical_session: canonical,
-                written: None,
-                warnings: all_warnings,
-            });
-        }
-
-        // 7. Same-provider short-circuit.
+        // 6. Same-provider short-circuit. Nothing is written either way, so a
+        // dry run reports `written: None` just like a real run reports the
+        // (empty) write result.
         if !opts.enrich && resolved.provider.slug() == target_provider.slug() {
             info!("source and target provider are the same — skipping write and verify");
             all_warnings.push(
@@ -530,13 +542,17 @@ session unless your cwd matches the written workspace."
                 source_provider: resolved.provider.slug().to_string(),
                 target_provider: target_provider.slug().to_string(),
                 canonical_session: canonical.clone(),
-                written: Some(WrittenSession {
-                    paths: Vec::new(),
-                    session_id: canonical.session_id.clone(),
-                    resume_command: target_provider.resume_command(&canonical.session_id),
-                    backup_path: None,
-                    warnings: Vec::new(),
-                }),
+                written: if opts.dry_run {
+                    None
+                } else {
+                    Some(WrittenSession {
+                        paths: Vec::new(),
+                        session_id: canonical.session_id.clone(),
+                        resume_command: target_provider.resume_command(&canonical.session_id),
+                        backup_path: None,
+                        warnings: Vec::new(),
+                    })
+                },
                 warnings: all_warnings,
             });
         }
@@ -609,6 +625,20 @@ session unless your cwd matches the written workspace."
                     msg.content = parts.join("\n");
                 }
             }
+        }
+
+        // 7c. Dry-run short-circuit — placed AFTER the context budget and
+        // tool-content normalization so the preview reflects exactly what a
+        // real run would write (truncation warnings included).
+        if opts.dry_run {
+            info!("dry run — skipping write and verify");
+            return Ok(ConversionResult {
+                source_provider: resolved.provider.slug().to_string(),
+                target_provider: target_provider.slug().to_string(),
+                canonical_session: canonical,
+                written: None,
+                warnings: all_warnings,
+            });
         }
 
         // 8. Write to target provider.

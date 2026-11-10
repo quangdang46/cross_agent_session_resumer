@@ -162,7 +162,7 @@ enum Command {
 
     /// Generate shell completions.
     Completions {
-        /// Shell to generate completions for (bash, zsh, fish).
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish).
         shell: String,
     },
 }
@@ -364,6 +364,8 @@ fn error_type_name(e: &anyhow::Error) -> &'static str {
             casr::error::CasrError::SessionConflict { .. } => "SessionConflict",
             casr::error::CasrError::ValidationError { .. } => "ValidationError",
             casr::error::CasrError::VerifyFailed { .. } => "VerifyFailed",
+            casr::error::CasrError::InvalidSessionId { .. } => "InvalidSessionId",
+            casr::error::CasrError::InvalidSourcePath { .. } => "InvalidSourcePath",
         }
     } else {
         "InternalError"
@@ -390,6 +392,18 @@ fn cmd_resume(
 ) -> anyhow::Result<()> {
     let registry = ProviderRegistry::default_registry();
     let pipeline = ConversionPipeline { registry };
+
+    if let Some(ref src) = source
+        && matches!(
+            casr::discovery::SourceHint::parse(src),
+            casr::discovery::SourceHint::Path(_)
+        )
+    {
+        eprintln!(
+            "{} --source is a file path; the positional session id '{session_id}' is ignored",
+            "Warning:".yellow().bold()
+        );
+    }
 
     let opts = ConvertOptions {
         dry_run,
@@ -525,9 +539,21 @@ fn cmd_list(
 ) -> anyhow::Result<()> {
     let registry = ProviderRegistry::default_registry();
     let installed = registry.installed_providers();
-    let provider_filter_slug = provider_filter
-        .and_then(|filter| registry.find_by_alias(filter).map(|p| p.slug().to_string()))
-        .or_else(|| provider_filter.map(|filter| filter.to_ascii_lowercase()));
+    // An explicit --provider filter must name a real provider; silently
+    // treating a typo as "no sessions" hides user error (and is inconsistent
+    // with --source <bogus>, which fails with UnknownProviderAlias).
+    let provider_filter_slug = match provider_filter {
+        Some(filter) => Some(
+            registry
+                .find_by_alias(filter)
+                .map(|p| p.slug().to_string())
+                .ok_or_else(|| casr::error::CasrError::UnknownProviderAlias {
+                    alias: filter.to_string(),
+                    known_aliases: registry.known_aliases(),
+                })?,
+        ),
+        None => None,
+    };
 
     #[derive(Debug)]
     struct SessionSummary {
@@ -1570,8 +1596,21 @@ fn cmd_info(
 ) -> anyhow::Result<()> {
     let registry = ProviderRegistry::default_registry();
     let source_hint = source.as_deref().map(casr::discovery::SourceHint::parse);
+    if let Some(casr::discovery::SourceHint::Path(_)) = source_hint {
+        eprintln!(
+            "{} --source is a file path; the positional session id '{session_id}' is ignored",
+            "Warning:".yellow().bold()
+        );
+    }
     let resolved = registry.resolve_session(session_id, source_hint.as_ref())?;
-    let session = resolved.provider.read_session(&resolved.path)?;
+    let session = resolved
+        .provider
+        .read_session(&resolved.path)
+        .map_err(|e| casr::error::CasrError::SessionReadError {
+            path: resolved.path.clone(),
+            provider: resolved.provider.slug().to_string(),
+            detail: format!("{e:#}"),
+        })?;
 
     let native_name = casr::model::native_name_from_metadata(&session.metadata);
     // The tail shows when `--peek` is passed OR `--peek-lines N` is given on its
@@ -1710,9 +1749,9 @@ fn cmd_completions(shell: &str) -> anyhow::Result<()> {
     use clap::CommandFactory;
     use clap_complete::{Shell, generate};
 
-    let parsed_shell: Shell = shell
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Unknown shell '{shell}'. Use: bash, zsh, fish"))?;
+    let parsed_shell: Shell = shell.parse().map_err(|_| {
+        anyhow::anyhow!("Unknown shell '{shell}'. Use: bash, zsh, fish, powershell, elvish")
+    })?;
 
     let mut cmd = Cli::command();
     generate(parsed_shell, &mut cmd, "casr", &mut std::io::stdout());
