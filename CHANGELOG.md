@@ -6,6 +6,28 @@ Versions correspond to [GitHub Releases](https://github.com/Dicklesworthstone/cr
 
 ---
 
+## [v0.4.1] — 2026-11-10
+
+> **Git tag**: `v0.4.1` on the release commit.
+
+### Security & Writer Safety
+
+- **Session-id path traversal hardening**: reject unsafe session ids used in target paths and sanitize ids across all writers (bd-session-id-path-traversal-6c2, bd-writer-id-traversal-ln2).
+- **Idempotent conversions**: honor deterministic `target_session_id` so repeated conversions are safe to re-run (bd-writer-nonidempotent-ids-y5l).
+- **Safe DB writes with rollback** for the Hermes, Cursor, and OpenCode providers (bd-hermes-cursor-db-write-safety-2dh).
+
+### Read-Back Verification & Fidelity
+
+- **Honest verification**: surface read-back warnings instead of silently passing; fixes `--source` parsing and dry-run budget behavior (bd-verification-honesty-batch-u7i, bd-fidelity-batch-ce2).
+- **Provider read-back fixes**: AMP no longer folds `tool_use` blocks into content; ChatGPT preserves every written message; Cursor recovers System/Other roles via `casr_role` tag; OpenCode no longer duplicates tool results into text parts on V2 writes.
+
+### Reliability & Cleanup
+
+- **Discovery robustness**: `owns_session` scan no longer aborts on a single bad `DirEntry` (bd-owns-session-abort-loop-3hn).
+- **Cleanup batch**: JSON envelope, performance, and guard improvements (bd-casr-cleanup-batch-qi2).
+
+---
+
 ## [v0.4.0] — 2026-09-06
 
 > **Git tag**: `v0.4.0` on commit `929c5e7`.
