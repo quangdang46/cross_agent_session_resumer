@@ -422,7 +422,35 @@ fn source_path_hint_non_file_non_virtual_errors() {
         .resolve_session("ignored-by-path-hint", Some(&hint))
         .expect_err("dir path hint should error");
 
-    assert!(matches!(err, CasrError::SessionNotFound { .. }));
+    assert!(
+        matches!(err, CasrError::InvalidSourcePath { .. }),
+        "expected InvalidSourcePath, got {err:?}"
+    );
+}
+
+#[test]
+fn source_path_hint_missing_file_reports_invalid_source_path() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let missing = tmp.path().join("does-not-exist.jsonl");
+
+    let cc = MockProvider::new(
+        "Claude Code",
+        "claude-code",
+        "cc",
+        true,
+        vec![tmp.path().to_path_buf()],
+    );
+    let registry = ProviderRegistry::new(vec![Box::new(cc)]);
+
+    let hint = SourceHint::Path(missing.clone());
+    let err = registry
+        .resolve_session("ignored", Some(&hint))
+        .expect_err("missing file should error");
+
+    assert!(
+        matches!(err, CasrError::InvalidSourcePath { .. }),
+        "expected InvalidSourcePath, got {err:?}"
+    );
 }
 
 #[test]

@@ -251,3 +251,107 @@ fn cc_owns_session_empty_returns_none() {
         result
     );
 }
+
+// ===========================================================================
+// Session id validation error variant
+// ===========================================================================
+
+#[test]
+fn traversal_id_returns_invalid_session_id_error() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().expect("cc tmpdir");
+    let codex_tmp = tempfile::TempDir::new().expect("codex tmpdir");
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+    let _codex_env = EnvGuard::set("CODEX_HOME", codex_tmp.path());
+
+    let registry = ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Codex)]);
+    let err = registry
+        .resolve_session("../../etc/passwd", None)
+        .expect_err("traversal id must be rejected");
+    assert!(
+        matches!(err, CasrError::InvalidSessionId { .. }),
+        "expected InvalidSessionId, got {err:?}"
+    );
+}
+
+// ===========================================================================
+// --source path handling
+// ===========================================================================
+
+#[test]
+fn source_path_to_missing_file_is_invalid_source_path() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().expect("cc tmpdir");
+    let codex_tmp = tempfile::TempDir::new().expect("codex tmpdir");
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+    let _codex_env = EnvGuard::set("CODEX_HOME", codex_tmp.path());
+
+    let registry = ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Codex)]);
+    let missing = cc_tmp.path().join("nope.jsonl");
+    let hint = casr::discovery::SourceHint::Path(missing);
+    let err = registry
+        .resolve_session("whatever", Some(&hint))
+        .expect_err("missing --source file must error");
+    assert!(
+        matches!(err, CasrError::InvalidSourcePath { .. }),
+        "expected InvalidSourcePath, got {err:?}"
+    );
+}
+
+#[test]
+fn source_path_to_garbage_file_fails_hard() {
+    // Regression: `--source <any-text-file>` used to fall through to the
+    // Aider best-effort parser, which treats ANY readable file as assistant
+    // output — garbage converted with ok:true. Unparseable content must now
+    // fail instead of being silently accepted.
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().expect("cc tmpdir");
+    let codex_tmp = tempfile::TempDir::new().expect("codex tmpdir");
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+    let _codex_env = EnvGuard::set("CODEX_HOME", codex_tmp.path());
+
+    let garbage = cc_tmp.path().join("garbage.txt");
+    std::fs::write(&garbage, "this is not a session file\njust some text\n").unwrap();
+
+    let registry = ProviderRegistry::new(vec![
+        Box::new(ClaudeCode),
+        Box::new(Codex),
+        Box::new(casr::providers::aider::Aider),
+    ]);
+    let hint = casr::discovery::SourceHint::Path(garbage);
+    let result = registry.resolve_session("whatever", Some(&hint));
+    assert!(
+        result.is_err(),
+        "garbage --source file must not resolve to a provider"
+    );
+}
+
+#[test]
+fn source_path_to_real_session_file_resolves() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().expect("cc tmpdir");
+    let codex_tmp = tempfile::TempDir::new().expect("codex tmpdir");
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+    let _codex_env = EnvGuard::set("CODEX_HOME", codex_tmp.path());
+
+    // Copy a real Claude fixture outside any provider root; signature
+    // inference should still identify it.
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude_code/cc_simple.jsonl"
+    );
+    let orphan = cc_tmp.path().join("orphan-cc.jsonl");
+    std::fs::copy(fixture, &orphan).expect("copy fixture");
+
+    let registry = ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Codex)]);
+    let hint = casr::discovery::SourceHint::Path(orphan.clone());
+    let resolved = registry
+        .resolve_session("ignored", Some(&hint))
+        .expect("real session file should resolve");
+    assert_eq!(resolved.provider.slug(), "claude-code");
+    assert_eq!(resolved.path, orphan);
+}

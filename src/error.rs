@@ -89,6 +89,18 @@ pub enum CasrError {
         existing_path: PathBuf,
     },
 
+    /// Session ID rejected before any filesystem lookup.
+    ///
+    /// Session ids are joined onto provider session roots during ownership
+    /// checks; ids containing absolute paths, `..` components, or NUL bytes
+    /// could escape those roots and read arbitrary files.
+    #[error("Invalid session id '{session_id}': {reason}")]
+    InvalidSessionId { session_id: String, reason: String },
+
+    /// `--source` path hint does not point at a usable session file.
+    #[error("Invalid --source path '{}': {reason}", path.display())]
+    InvalidSourcePath { path: PathBuf, reason: String },
+
     /// Canonical session failed validation checks.
     ///
     /// `errors` are fatal (pipeline stops); `warnings` and `info` are

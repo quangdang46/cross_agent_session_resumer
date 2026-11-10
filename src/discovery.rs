@@ -60,6 +60,45 @@ impl SourceHint {
     }
 }
 
+/// Reject session ids that could escape provider session roots.
+///
+/// `owns_session` implementations join the id onto a provider root
+/// (e.g. `sessions_dir.join(session_id)`); ids containing absolute paths,
+/// `..`/prefix components, or NUL bytes could resolve arbitrary files outside
+/// those roots. Codex legitimately uses slash-separated *relative* ids
+/// (`2026/02/06/rollout-…`), so `/` itself is allowed — only traversal
+/// primitives are rejected.
+pub fn validate_session_id(session_id: &str) -> Result<(), CasrError> {
+    let reject = |reason: &str| CasrError::InvalidSessionId {
+        session_id: session_id.to_string(),
+        reason: reason.to_string(),
+    };
+
+    if session_id.trim().is_empty() {
+        return Err(reject("session id is empty"));
+    }
+    if session_id.contains('\0') {
+        return Err(reject("session id contains a NUL byte"));
+    }
+    let path = Path::new(session_id);
+    if path.is_absolute() {
+        return Err(reject("session id must not be an absolute path"));
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_)
+            | std::path::Component::RootDir
+            | std::path::Component::ParentDir => {
+                return Err(reject(
+                    "session id must not contain path traversal components",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Resolved session
 // ---------------------------------------------------------------------------
@@ -198,6 +237,12 @@ impl ProviderRegistry {
         session_id: &str,
         source_hint: Option<&SourceHint>,
     ) -> Result<ResolvedSession<'_>, CasrError> {
+        // Session ids are joined onto provider roots by `owns_session`;
+        // reject traversal payloads before any provider sees them. This also
+        // applies to path hints so a bogus positional id can't smuggle a
+        // traversal attempt past the CLI surface.
+        validate_session_id(session_id)?;
+
         match source_hint {
             Some(SourceHint::Path(path)) => self.resolve_from_path(session_id, path),
             Some(SourceHint::Alias(alias)) => self.resolve_with_alias(session_id, alias),
@@ -211,7 +256,7 @@ impl ProviderRegistry {
     /// contain the path. Falls back to file extension heuristics.
     fn resolve_from_path(
         &self,
-        session_id: &str,
+        _session_id: &str,
         path: &Path,
     ) -> Result<ResolvedSession<'_>, CasrError> {
         debug!(path = %path.display(), "resolving session from explicit path");
@@ -220,11 +265,16 @@ impl ProviderRegistry {
         // `<db-file>/<session-id>` where the *parent* is the real file.
         let parent_is_file = path.parent().is_some_and(|p| p.is_file());
 
+        if path.is_dir() {
+            return Err(CasrError::InvalidSourcePath {
+                path: path.to_path_buf(),
+                reason: "path is a directory, not a session file".to_string(),
+            });
+        }
         if !path.is_file() && !parent_is_file {
-            return Err(CasrError::SessionNotFound {
-                session_id: session_id.to_string(),
-                providers_checked: vec!["(direct path)".to_string()],
-                sessions_scanned: 0,
+            return Err(CasrError::InvalidSourcePath {
+                path: path.to_path_buf(),
+                reason: "no such file".to_string(),
             });
         }
 
@@ -262,7 +312,7 @@ impl ProviderRegistry {
             });
         }
 
-        let mut best: Option<(&dyn Provider, usize, bool)> = None;
+        let mut best: Option<(&dyn Provider, usize)> = None;
         let mut providers_tried: Vec<String> = Vec::new();
 
         for provider in &self.providers {
@@ -276,32 +326,29 @@ impl ProviderRegistry {
                 continue;
             }
 
-            let plausible = is_plausible_session(&session);
+            // `--source` on an arbitrary file must not be rescued by a lenient
+            // best-effort parser (e.g. Aider treats any text file as assistant
+            // output). Require the same user+assistant bar `casr list` uses;
+            // anything less is not a recognizable session.
+            if !is_plausible_session(&session) {
+                continue;
+            }
 
-            let is_better = best.is_none_or(|(best_provider, best_len, best_plausible)| {
-                (plausible, session.messages.len(), provider.slug())
-                    > (best_plausible, best_len, best_provider.slug())
+            let is_better = best.is_none_or(|(best_provider, best_len)| {
+                (session.messages.len(), provider.slug()) > (best_len, best_provider.slug())
             });
 
             if is_better {
-                best = Some((provider.as_ref(), session.messages.len(), plausible));
+                best = Some((provider.as_ref(), session.messages.len()));
             }
         }
 
-        if let Some((provider, _len, plausible)) = best {
-            if !plausible {
-                warn!(
-                    provider = provider.name(),
-                    path = %path.display(),
-                    "no provider root matched path; selected best-effort parser (session may not be resumable)"
-                );
-            } else {
-                info!(
-                    provider = provider.name(),
-                    path = %path.display(),
-                    "resolved session from explicit path via provider probing"
-                );
-            }
+        if let Some((provider, _len)) = best {
+            info!(
+                provider = provider.name(),
+                path = %path.display(),
+                "resolved session from explicit path via provider probing"
+            );
             return Ok(ResolvedSession {
                 provider,
                 path: path.to_path_buf(),
@@ -803,6 +850,39 @@ mod tests {
                 assert_eq!(p, expected);
             }
             other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_session_id_rejects_traversal_and_accepts_relative_ids() {
+        use super::validate_session_id;
+        use crate::error::CasrError;
+
+        for bad in [
+            "",
+            "   ",
+            "../escape",
+            "a/../../b",
+            "..",
+            "/etc/passwd",
+            "session\0id",
+        ] {
+            assert!(
+                matches!(
+                    validate_session_id(bad),
+                    Err(CasrError::InvalidSessionId { .. })
+                ),
+                "expected InvalidSessionId for {bad:?}"
+            );
+        }
+
+        // Codex-style relative path ids and ordinary ids stay valid.
+        for ok in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "2026/02/06/rollout-1",
+            "casr-cc-abc",
+        ] {
+            assert!(validate_session_id(ok).is_ok(), "expected ok for {ok:?}");
         }
     }
 
