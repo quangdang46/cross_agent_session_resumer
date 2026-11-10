@@ -37,6 +37,25 @@ const VIRTUAL_SEPARATOR: char = '#';
 /// converted sessions.
 const CASR_ID_SUFFIX: &str = "-casr";
 
+/// Rows captured before a `--force` overwrite of a Hermes session, restored
+/// verbatim if the pipeline's read-back verification fails. `SELECT *` column
+/// order is preserved so `INSERT INTO … VALUES (…)` round-trips regardless of
+/// which schema variant created the table.
+struct HermesSessionSnapshot {
+    /// All column values of the `sessions` row, or `None` if absent.
+    session_row: Option<Vec<rusqlite::types::Value>>,
+    /// All column values of every `messages` row (ordered by `id`).
+    message_rows: Vec<Vec<rusqlite::types::Value>>,
+}
+
+/// In-process store of pre-overwrite snapshots keyed by `(db_path, session_id)`.
+/// Entries are consumed by [`Provider::rollback_written`] or replaced by the
+/// next overwrite of the same session; the CLI is short-lived so leftovers
+/// are bounded by the number of force-overwrites in one invocation.
+static HERMES_SNAPSHOTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(PathBuf, String), HermesSessionSnapshot>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 // Thread-local override for the Hermes home directory (used in tests).
 // Rust 2024 marks `set_var`/`remove_var` as unsafe and the crate forbids
 // unsafe code, so we provide a safe test override via thread-local storage.
@@ -373,6 +392,7 @@ impl Hermes {
         db_path: &Path,
         session: &CanonicalSession,
         target_session_id: &str,
+        force: bool,
     ) -> anyhow::Result<()> {
         debug!(
             db = %db_path.display(),
@@ -386,7 +406,7 @@ impl Hermes {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let conn = Self::open_db(db_path)?;
+        let mut conn = Self::open_db(db_path)?;
 
         // Enable WAL mode for concurrent read/write safety.
         conn.execute_batch("PRAGMA journal_mode=WAL")
@@ -457,6 +477,45 @@ impl Hermes {
         )
         .context("failed to create tables")?;
 
+        // Conflict handling: an existing session id is only overwritten when
+        // the caller passed --force. Without it we surface SessionConflict so
+        // a re-run cannot silently duplicate or clobber the transcript.
+        let existed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![target_session_id],
+                |row| row.get(0),
+            )
+            .context("failed to check for existing Hermes session")?;
+        if existed && !force {
+            return Err(crate::error::CasrError::SessionConflict {
+                session_id: target_session_id.to_string(),
+                existing_path: db_path.to_path_buf(),
+            }
+            .into());
+        }
+
+        // Snapshot the previous rows before overwriting so a failed
+        // read-back verification can restore them (see `rollback_written`).
+        let snapshot = if existed {
+            Some(Self::snapshot_session_rows(&conn, target_session_id)?)
+        } else {
+            None
+        };
+
+        // Everything below runs in one transaction: old messages are deleted
+        // first so re-conversion never leaves a duplicated transcript, and a
+        // mid-write failure rolls back cleanly instead of leaving partial rows.
+        let tx = conn
+            .transaction()
+            .context("failed to begin Hermes write transaction")?;
+
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            rusqlite::params![target_session_id],
+        )
+        .context("failed to clear existing Hermes messages")?;
+
         // Insert session metadata row.
         let cwd_str = session
             .workspace
@@ -482,7 +541,7 @@ impl Hermes {
             })
             .unwrap_or_else(|| "Converted Session".to_string());
 
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO sessions
                 (id, source, model, cwd, title, started_at, ended_at, message_count)
              VALUES (?1, 'casr', ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -529,7 +588,7 @@ impl Hermes {
                     (None, None)
                 };
 
-            conn.execute(
+            tx.execute(
                 "INSERT INTO messages
                     (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, active)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
@@ -544,6 +603,15 @@ impl Hermes {
                 ],
             )
             .context("failed to insert message row")?;
+        }
+
+        tx.commit()
+            .context("failed to commit Hermes write transaction")?;
+
+        // Keep the pre-overwrite snapshot for `rollback_written` in case the
+        // pipeline's read-back verification fails.
+        if let Some(snap) = snapshot {
+            Self::store_snapshot(db_path, target_session_id, snap);
         }
 
         info!(
@@ -566,6 +634,60 @@ impl Hermes {
             .filter_map(Result::ok)
             .collect();
         Ok(ids)
+    }
+
+    /// Capture every `sessions`/`messages` row for `session_id` so a later
+    /// `--force` overwrite can be rolled back if verification fails.
+    fn snapshot_session_rows(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> anyhow::Result<HermesSessionSnapshot> {
+        use rusqlite::OptionalExtension;
+
+        fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<rusqlite::types::Value>> {
+            let n = row.as_ref().column_count();
+            let mut vals = Vec::with_capacity(n);
+            for i in 0..n {
+                vals.push(row.get::<_, rusqlite::types::Value>(i)?);
+            }
+            Ok(vals)
+        }
+
+        let session_row = conn
+            .query_row(
+                "SELECT * FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                read_row,
+            )
+            .optional()
+            .context("failed to snapshot Hermes session row")?;
+
+        let mut stmt = conn
+            .prepare("SELECT * FROM messages WHERE session_id = ?1 ORDER BY id")
+            .context("failed to prepare Hermes messages snapshot")?;
+        let message_rows = stmt
+            .query_map(rusqlite::params![session_id], read_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to snapshot Hermes message rows")?;
+
+        Ok(HermesSessionSnapshot {
+            session_row,
+            message_rows,
+        })
+    }
+
+    fn store_snapshot(db_path: &Path, session_id: &str, snap: HermesSessionSnapshot) {
+        if let Ok(mut guard) = HERMES_SNAPSHOTS.lock() {
+            guard.insert((db_path.to_path_buf(), session_id.to_string()), snap);
+        }
+    }
+
+    /// Take (and remove) any stored pre-overwrite snapshot for this session.
+    fn take_snapshot(db_path: &Path, session_id: &str) -> Option<HermesSessionSnapshot> {
+        HERMES_SNAPSHOTS
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&(db_path.to_path_buf(), session_id.to_string())))
     }
 }
 
@@ -703,18 +825,26 @@ impl Provider for Hermes {
         })?;
 
         // Use caller-supplied ID when available, otherwise derive one.
-        let target_session_id = opts.target_session_id.clone().unwrap_or_else(|| {
-            // Deterministic ID based on timestamp.
-            let now = chrono::Utc::now();
-            format!(
-                "{}-{}{}",
-                now.format("%Y%m%dT%H%M%S"),
-                &uuid::Uuid::new_v4().to_string()[..8],
-                CASR_ID_SUFFIX,
-            )
-        });
+        let target_session_id = opts
+            .target_session_id
+            .clone()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            // `#` is the virtual-path separator (`<db>#<session-id>`); an id
+            // containing it would not round-trip through `parse_virtual_path`.
+            .map(|s| s.replace('#', "-"))
+            .unwrap_or_else(|| {
+                // Deterministic ID based on timestamp.
+                let now = chrono::Utc::now();
+                format!(
+                    "{}-{}{}",
+                    now.format("%Y%m%dT%H%M%S"),
+                    &uuid::Uuid::new_v4().to_string()[..8],
+                    CASR_ID_SUFFIX,
+                )
+            });
 
-        Self::write_session_to_db(&db_path, session, &target_session_id)?;
+        Self::write_session_to_db(&db_path, session, &target_session_id, opts.force)?;
 
         let virtual_path = Self::build_virtual_path(&db_path, &target_session_id);
 
@@ -749,6 +879,69 @@ impl Provider for Hermes {
 
         debug!(count = sessions.len(), "Hermes list_sessions");
         Some(sessions)
+    }
+
+    /// Remove the written session's DB rows after a failed read-back
+    /// verification. If the write overwrote a pre-existing session, its rows
+    /// are restored from the snapshot taken before the overwrite; otherwise
+    /// the freshly written rows are deleted outright.
+    fn rollback_written(&self, written: &WrittenSession) -> anyhow::Result<()> {
+        let Some(first_path) = written.paths.first() else {
+            return Ok(());
+        };
+        let (db_path, opt_session_id) = Self::parse_virtual_path(first_path);
+        let session_id = opt_session_id.unwrap_or_else(|| written.session_id.clone());
+        let snapshot = Self::take_snapshot(&db_path, &session_id);
+
+        let mut conn = Self::open_db(&db_path)?;
+        let tx = conn
+            .transaction()
+            .context("failed to begin Hermes rollback transaction")?;
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )
+        .context("failed to delete Hermes messages during rollback")?;
+        tx.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            rusqlite::params![session_id],
+        )
+        .context("failed to delete Hermes session during rollback")?;
+
+        if let Some(snap) = snapshot {
+            if let Some(vals) = &snap.session_row {
+                Self::insert_row_values(&tx, "sessions", vals)?;
+            }
+            for vals in &snap.message_rows {
+                Self::insert_row_values(&tx, "messages", vals)?;
+            }
+        }
+
+        tx.commit()
+            .context("failed to commit Hermes rollback transaction")?;
+        info!(
+            session_id,
+            "Hermes session rolled back after verification failure"
+        );
+        Ok(())
+    }
+}
+
+impl Hermes {
+    /// Re-insert a full `SELECT *` row captured by [`Self::snapshot_session_rows`].
+    fn insert_row_values(
+        tx: &rusqlite::Transaction<'_>,
+        table: &str,
+        vals: &[rusqlite::types::Value],
+    ) -> anyhow::Result<()> {
+        let placeholders = (1..=vals.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("INSERT INTO {table} VALUES ({placeholders})");
+        tx.execute(&sql, rusqlite::params_from_iter(vals.iter()))
+            .with_context(|| format!("failed to restore Hermes {table} row"))?;
+        Ok(())
     }
 }
 
@@ -1417,5 +1610,154 @@ mod tests {
             readback.messages[0].tool_calls[0].arguments["command"],
             "ls -la"
         );
+    }
+
+    #[test]
+    fn writer_rewrite_without_force_conflicts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _guard = set_test_home(tmp.path());
+        let session = make_canonical_session(vec![CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "Hello".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        }]);
+        let opts = WriteOptions {
+            force: false,
+            target_session_id: Some("dup-test".to_string()),
+        };
+        Hermes.write_session(&session, &opts).expect("first write");
+        let err = Hermes.write_session(&session, &opts).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists")
+                || err.to_string().contains("conflict")
+                || format!("{err:?}").contains("SessionConflict"),
+            "expected conflict, got: {err}"
+        );
+    }
+
+    #[test]
+    fn writer_force_rewrite_does_not_duplicate_messages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _guard = set_test_home(tmp.path());
+        let session = make_canonical_session(vec![
+            CanonicalMessage {
+                idx: 0,
+                role: MessageRole::User,
+                content: "one".to_string(),
+                timestamp: Some(1_700_000_000_000),
+                author: None,
+                tool_calls: vec![],
+                tool_results: vec![],
+                extra: serde_json::Value::Null,
+            },
+            CanonicalMessage {
+                idx: 1,
+                role: MessageRole::Assistant,
+                content: "two".to_string(),
+                timestamp: Some(1_700_000_000_500),
+                author: None,
+                tool_calls: vec![],
+                tool_results: vec![],
+                extra: serde_json::Value::Null,
+            },
+        ]);
+        let opts = WriteOptions {
+            force: true,
+            target_session_id: Some("dup-force-test".to_string()),
+        };
+        Hermes.write_session(&session, &opts).expect("first write");
+        let written = Hermes.write_session(&session, &opts).expect("forced rewrite");
+
+        let readback = Hermes.read_session(&written.paths[0]).expect("readback");
+        assert_eq!(
+            readback.messages.len(),
+            2,
+            "force rewrite must replace, not duplicate, messages"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_pre_overwrite_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _guard = set_test_home(tmp.path());
+
+        // Seed an original session directly.
+        let seed = make_canonical_session(vec![CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "original".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        }]);
+        let first = Hermes
+            .write_session(
+                &seed,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: Some("rb-test".to_string()),
+                },
+            )
+            .expect("seed write");
+
+        // Force-overwrite with different content (captures snapshot).
+        let mut replacement = seed.clone();
+        replacement.messages[0].content = "replacement".to_string();
+        let second = Hermes
+            .write_session(
+                &replacement,
+                &WriteOptions {
+                    force: true,
+                    target_session_id: Some("rb-test".to_string()),
+                },
+            )
+            .expect("forced overwrite");
+        assert_eq!(second.paths, first.paths);
+
+        // Simulate verification failure: roll back.
+        Hermes
+            .rollback_written(&second)
+            .expect("rollback_written");
+
+        let restored = Hermes.read_session(&first.paths[0]).expect("readback after rollback");
+        assert_eq!(restored.messages.len(), 1);
+        assert_eq!(restored.messages[0].content, "original");
+    }
+
+    #[test]
+    fn rollback_without_snapshot_deletes_new_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _guard = set_test_home(tmp.path());
+        let session = make_canonical_session(vec![CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "fresh".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        }]);
+        let written = Hermes
+            .write_session(
+                &session,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: Some("rb-fresh".to_string()),
+                },
+            )
+            .expect("write");
+        Hermes
+            .rollback_written(&written)
+            .expect("rollback");
+        let err = Hermes.read_session(&written.paths[0]).unwrap_err();
+        assert!(format!("{err}").contains("not found"));
     }
 }

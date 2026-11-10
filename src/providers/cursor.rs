@@ -569,6 +569,21 @@ impl Provider for Cursor {
 
         let tx = conn.transaction().context("failed to begin transaction")?;
 
+        // Remove any pre-existing bubbles for this composer before writing.
+        // Bubble ids are fresh UUIDs per write, so without this an overwrite
+        // (--force re-conversion) would leave the old `bubbleId:{composer}:*`
+        // rows behind as ghost bubbles that composerData no longer references.
+        // Uses the same key-range bounds as `fetch_bubbles` (`:` .. `;`).
+        {
+            let prefix = format!("bubbleId:{target_composer_id}:");
+            let prefix_upper = format!("bubbleId:{target_composer_id};");
+            tx.execute(
+                "DELETE FROM cursorDiskKV WHERE key >= ?1 AND key < ?2",
+                rusqlite::params![prefix, prefix_upper],
+            )
+            .context("failed to clear stale Cursor bubbles")?;
+        }
+
         // Build bubble entries and conversation headers.
         let mut headers: Vec<serde_json::Value> = Vec::new();
 
@@ -685,6 +700,57 @@ impl Provider for Cursor {
         // Cursor has no session-specific resume mechanism.
         // Best we can do is open Cursor.
         "cursor .".to_string()
+    }
+
+    /// Delete the `composerData:`/`bubbleId:` keys written for a session after
+    /// a failed read-back verification. Note: on a `--force` overwrite of a
+    /// pre-existing composer the previous bubbles were already cleared by the
+    /// pre-write sweep, so this removes the converted session entirely —
+    /// force semantics accept that the prior transcript is replaced.
+    fn rollback_written(&self, written: &WrittenSession) -> anyhow::Result<()> {
+        let Some(first_path) = written.paths.first() else {
+            return Ok(());
+        };
+        // Virtual path form: `<db_path>/<urlencoded-composer-id>`.
+        let Some(db_path) = first_path.parent() else {
+            return Ok(());
+        };
+        if !db_path.is_file() {
+            return Ok(());
+        }
+        let filename = first_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default();
+        let composer_id = urlencoding::decode(filename)
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| filename.to_string());
+        if composer_id.is_empty() {
+            return Ok(());
+        }
+        let mut conn = Self::open_db_rw(db_path)?;
+        let tx = conn
+            .transaction()
+            .context("failed to begin Cursor rollback")?;
+        tx.execute(
+            "DELETE FROM cursorDiskKV WHERE key = ?1",
+            rusqlite::params![format!("composerData:{composer_id}")],
+        )
+        .context("failed to delete Cursor composerData during rollback")?;
+        // Same key-range bounds as fetch_bubbles (`:` .. `;`).
+        let prefix = format!("bubbleId:{composer_id}:");
+        let prefix_upper = format!("bubbleId:{composer_id};");
+        tx.execute(
+            "DELETE FROM cursorDiskKV WHERE key >= ?1 AND key < ?2",
+            rusqlite::params![prefix, prefix_upper],
+        )
+        .context("failed to delete Cursor bubbles during rollback")?;
+        tx.commit().context("failed to commit Cursor rollback")?;
+        info!(
+            composer_id,
+            "Cursor session rolled back after verification failure"
+        );
+        Ok(())
     }
 
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {

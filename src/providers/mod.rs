@@ -129,6 +129,17 @@ pub trait Provider: Send + Sync {
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
         None
     }
+
+    /// Remove persistent state produced by [`Provider::write_session`] after a
+    /// failed read-back verification.
+    ///
+    /// File-based providers are rolled back by the pipeline via path deletion
+    /// (and `.bak` restore); DB-backed providers override this to delete or
+    /// restore their rows since their `WrittenSession::paths` are virtual and
+    /// cannot be removed as files. The default is a no-op.
+    fn rollback_written(&self, _written: &WrittenSession) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

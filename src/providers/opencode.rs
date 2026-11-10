@@ -995,6 +995,34 @@ impl Provider for OpenCode {
 
         Some(results)
     }
+
+    /// Delete the session's rows after a failed read-back verification.
+    ///
+    /// Note: on a `--force` overwrite of a pre-existing session the cascade
+    /// delete already removed the prior transcript before the new one was
+    /// written, so this removes the converted session entirely — force
+    /// semantics accept that the prior transcript is replaced.
+    fn rollback_written(&self, written: &WrittenSession) -> anyhow::Result<()> {
+        let Some(first_path) = written.paths.first() else {
+            return Ok(());
+        };
+        let Some((db_path, session_id)) = Self::parse_virtual_path(first_path) else {
+            return Ok(());
+        };
+        let conn = Self::open_db_rw(&db_path)?;
+        let schema =
+            if Self::table_exists(&conn, "session") || Self::table_exists(&conn, "sessions") {
+                Self::detect_schema(&conn)
+            } else {
+                return Ok(());
+            };
+        Self::delete_session_cascade(&conn, schema, &session_id)?;
+        info!(
+            session_id,
+            "OpenCode session rolled back after verification failure"
+        );
+        Ok(())
+    }
 }
 
 impl OpenCode {

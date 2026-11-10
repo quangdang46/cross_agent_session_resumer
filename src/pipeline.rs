@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::discovery::{ProviderRegistry, SourceHint};
 use crate::error::CasrError;
 use crate::model::{CanonicalMessage, CanonicalSession, MessageRole, reindex_messages};
-use crate::providers::{WriteOptions, WrittenSession};
+use crate::providers::{Provider, WriteOptions, WrittenSession};
 
 /// Top-level orchestrator for session conversion.
 pub struct ConversionPipeline {
@@ -681,13 +681,7 @@ session unless your cwd matches the written workspace."
                         readback_mismatch_detail(&canonical, &readback, target_provider.slug())
                     {
                         warn!(detail, "read-back verification failed");
-                        let rollback_detail =
-                            match rollback_written_session(target_provider.slug(), &written) {
-                                Ok(()) => "rollback succeeded".to_string(),
-                                Err(rollback_error) => {
-                                    format!("rollback failed: {rollback_error}")
-                                }
-                            };
+                        let rollback_detail = perform_write_rollback(target_provider, &written);
                         return Err(CasrError::VerifyFailed {
                             provider: target_provider.slug().to_string(),
                             written_paths: written.paths.clone(),
@@ -698,13 +692,7 @@ session unless your cwd matches the written workspace."
                 }
                 Err(e) => {
                     warn!(error = %e, "read-back verification failed");
-                    let rollback_detail =
-                        match rollback_written_session(target_provider.slug(), &written) {
-                            Ok(()) => "rollback succeeded".to_string(),
-                            Err(rollback_error) => {
-                                format!("rollback failed: {rollback_error}")
-                            }
-                        };
+                    let rollback_detail = perform_write_rollback(target_provider, &written);
                     return Err(CasrError::VerifyFailed {
                         provider: target_provider.slug().to_string(),
                         written_paths: written.paths.clone(),
@@ -1030,6 +1018,34 @@ fn count_logical_events(messages: &[crate::model::CanonicalMessage]) -> usize {
         let _ = msg.role == MessageRole::Tool; // silence unused
     }
     count
+}
+
+/// Roll back everything a failed verification left behind and describe the
+/// outcome for the error detail string.
+///
+/// File-based providers are handled by [`rollback_written_session`];
+/// DB-backed providers additionally get [`Provider::rollback_written`] so
+/// their rows/keys are removed or restored too.
+fn perform_write_rollback(provider: &dyn Provider, written: &WrittenSession) -> String {
+    let file_result = rollback_written_session(provider.slug(), written);
+    let provider_result = provider.rollback_written(written);
+    match (&file_result, &provider_result) {
+        (Ok(()), Ok(())) => "rollback succeeded".to_string(),
+        _ => {
+            let describe = |r: &Result<(), CasrError>| match r {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("failed: {e}"),
+            };
+            let provider_msg = provider_result
+                .as_ref()
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|e| format!("failed: {e:#}"));
+            format!(
+                "rollback incomplete — file: {}; provider store: {provider_msg}",
+                describe(&file_result)
+            )
+        }
+    }
 }
 
 fn rollback_written_session(
