@@ -163,12 +163,16 @@ impl Provider for ClaudeCode {
         // Scan project directories for a file matching <session-id>.jsonl
         let target_filename = format!("{session_id}.jsonl");
         for entry in std::fs::read_dir(&projects_dir).ok()?.flatten() {
-            if entry.file_type().ok()?.is_dir() {
-                let candidate = entry.path().join(&target_filename);
-                if candidate.is_file() {
-                    debug!(path = %candidate.display(), "found Claude Code session");
-                    return Some(candidate);
-                }
+            // A single unreadable DirEntry must not abort the whole scan —
+            // skip it and keep looking for the session file.
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => {}
+                _ => continue,
+            }
+            let candidate = entry.path().join(&target_filename);
+            if candidate.is_file() {
+                debug!(path = %candidate.display(), "found Claude Code session");
+                return Some(candidate);
             }
         }
         None
