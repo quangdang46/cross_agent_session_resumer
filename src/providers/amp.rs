@@ -288,6 +288,37 @@ impl Amp {
             .collect()
     }
 
+    /// Flatten Amp message content to plain text WITHOUT folding tool blocks
+    /// into the string.
+    ///
+    /// `flatten_content` renders `tool_use` blocks as `[Tool: name]` lines, but
+    /// the Amp reader already surfaces those blocks via `tool_calls` /
+    /// `tool_results`. Including them in `content` too makes the canonical
+    /// message diverge from what the writer emits (text block + structured
+    /// blocks), breaking write↔read-back verification.
+    fn extract_text_content(content: &serde_json::Value) -> String {
+        let serde_json::Value::Array(blocks) = content else {
+            return flatten_content(content);
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for block in blocks {
+            match block {
+                serde_json::Value::String(s) => parts.push(s.clone()),
+                serde_json::Value::Object(obj) => {
+                    let block_type = obj.get("type").and_then(|v| v.as_str());
+                    if matches!(block_type, Some("tool_use") | Some("tool_result")) {
+                        continue;
+                    }
+                    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                        parts.push(text.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        parts.join("\n")
+    }
+
     fn extract_message_timestamp(msg: &serde_json::Value) -> Option<i64> {
         msg.get("meta")
             .and_then(|v| v.get("sentAt"))
@@ -594,7 +625,7 @@ impl Provider for Amp {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
 
-            let mut content = flatten_content(&content_val);
+            let mut content = Self::extract_text_content(&content_val);
             if content.trim().is_empty()
                 && let Some(summary_text) = Self::extract_info_summary_text(msg)
             {
@@ -789,7 +820,8 @@ mod tests {
         assert_eq!(session.messages[0].timestamp, Some(created));
 
         assert_eq!(session.messages[1].role, MessageRole::Assistant);
-        assert_eq!(session.messages[1].content, "Hi\n[Tool: Read]");
+        // tool_use blocks surface via tool_calls, not as `[Tool: …]` text.
+        assert_eq!(session.messages[1].content, "Hi");
         assert_eq!(session.messages[1].tool_calls.len(), 1);
         assert_eq!(
             session.messages[1].tool_calls[0].id.as_deref(),
@@ -1032,16 +1064,11 @@ mod tests {
             Some(PathBuf::from("/data/projects/ws_roundtrip"))
         );
         assert_eq!(readback.messages.len(), session.messages.len());
-        fn strip_tool_lines(s: &str) -> String {
-            s.lines()
-                .filter(|line| !line.trim_start().starts_with("[Tool:"))
-                .collect::<Vec<&str>>()
-                .join("\n")
-        }
-
+        // Content must round-trip byte-exact: tool_use/tool_result blocks are
+        // carried by tool_calls/tool_results, not folded into `content`.
         for (orig, rb) in session.messages.iter().zip(readback.messages.iter()) {
             assert_eq!(orig.role, rb.role);
-            assert_eq!(orig.content, strip_tool_lines(&rb.content));
+            assert_eq!(orig.content, rb.content);
         }
         assert_eq!(readback.messages[1].tool_calls.len(), 1);
         assert_eq!(readback.messages[1].tool_results.len(), 1);
