@@ -5,7 +5,7 @@
 //! trait — concrete providers are wired in via the registry.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
 };
 
@@ -439,6 +439,18 @@ but resume may fail until the CLI is installed.",
                 provider: resolved.provider.slug().to_string(),
                 detail: format!("{e:#}"),
             })?;
+        // Surface read-side warnings providers recorded in canonical metadata
+        // (e.g. Codex malformed JSONL lines that were skipped during parse).
+        if let Some(warns) = canonical
+            .metadata
+            .as_object_mut()
+            .and_then(|m| m.remove("casr_read_warnings"))
+            .and_then(|v| v.as_array().cloned())
+        {
+            for w in warns.iter().filter_map(|v| v.as_str()) {
+                all_warnings.push(w.to_string());
+            }
+        }
         if canonical.messages.is_empty() {
             return Err(CasrError::SessionReadError {
                 path: resolved.path.clone(),
@@ -677,9 +689,9 @@ session unless your cwd matches the written workspace."
                         original_messages = canonical.messages.len(),
                         "read-back verification"
                     );
-                    if let Some(detail) =
-                        readback_mismatch_detail(&canonical, &readback, target_provider.slug())
-                    {
+                    let check = verify_readback(&canonical, &readback, target_provider.slug());
+                    all_warnings.extend(check.warnings);
+                    if let Some(detail) = check.mismatch {
                         warn!(detail, "read-back verification failed");
                         let rollback_detail = perform_write_rollback(target_provider, &written);
                         return Err(CasrError::VerifyFailed {
@@ -900,11 +912,114 @@ fn readback_role_bucket(role: &MessageRole, provider_slug: &str) -> &'static str
     }
 }
 
-fn readback_mismatch_detail(
+/// Outcome of comparing a written session against its read-back.
+struct ReadbackCheck {
+    /// `Some(detail)` when verification failed and the write must roll back.
+    mismatch: Option<String>,
+    /// Non-fatal fidelity notes (e.g. messages a target format cannot
+    /// represent) surfaced as conversion warnings.
+    warnings: Vec<String>,
+}
+
+/// Hash a string to a short hex digest for multiset comparisons.
+fn content_hash(s: &str) -> String {
+    let digest = Sha256::digest(s.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Sorted multiset of `(role bucket, content hash)` atoms.
+///
+/// Used by providers whose native ordering or message splitting makes
+/// positional comparison meaningless or overly strict (OpenCode re-orders by
+/// `(created_at, id)`; ChatGPT sorts nodes by `create_time`; Cursor stores
+/// bubbles unordered in a KV table). Comparing the multiset still catches
+/// dropped, duplicated, or mangled content.
+fn role_content_multiset(
+    messages: &[CanonicalMessage],
+    provider_slug: &str,
+    keep: impl Fn(&CanonicalMessage) -> bool,
+) -> Vec<String> {
+    let mut atoms: Vec<String> = messages
+        .iter()
+        .filter(|m| keep(m))
+        .map(|m| {
+            format!(
+                "{}:{}",
+                readback_role_bucket(&m.role, provider_slug),
+                content_hash(&m.content)
+            )
+        })
+        .collect();
+    atoms.sort_unstable();
+    atoms
+}
+
+/// Sorted multiset of content atoms for Codex logical-event verification:
+/// message text, tool-call `(name, arguments)`, and tool-result content.
+/// Counts alone cannot detect mangled payloads, so hashes are compared too.
+fn codex_content_atom_multiset(messages: &[CanonicalMessage]) -> Vec<String> {
+    let mut atoms: Vec<String> = Vec::new();
+    for msg in messages {
+        if !msg.content.trim().is_empty() {
+            atoms.push(format!("text:{}", content_hash(msg.content.trim())));
+        }
+        for tc in &msg.tool_calls {
+            atoms.push(format!(
+                "call:{}",
+                content_hash(&format!(
+                    "{}\u{0}{}",
+                    tc.name,
+                    tool_call_arguments_key(&tc.arguments)
+                ))
+            ));
+        }
+        for tr in &msg.tool_results {
+            atoms.push(format!("result:{}", content_hash(tr.content.trim())));
+        }
+    }
+    atoms.sort_unstable();
+    atoms
+}
+
+/// Canonical string form of tool-call arguments for hashing. The Codex writer
+/// emits `Value::String` arguments verbatim while the reader parses them back
+/// into a `Value`, so normalize both sides through JSON when possible.
+fn tool_call_arguments_key(args: &serde_json::Value) -> String {
+    match args {
+        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| s.clone()),
+        other => other.to_string(),
+    }
+}
+
+/// Whether the target provider's writer/reader pair can round-trip this
+/// message at all. Messages failing this predicate are excluded from BOTH
+/// sides of the comparison (the read-back legitimately lacks them) and
+/// reported as warnings instead of false verification failures.
+fn is_expressible_for_provider(msg: &CanonicalMessage, provider_slug: &str) -> bool {
+    match provider_slug {
+        // Cursor bubbles with no text are skipped by `parse_bubble` on
+        // read-back, so empty-content messages cannot round-trip.
+        "cursor" => !msg.content.trim().is_empty(),
+        // ChatGPT's casr-aware reader preserves system/tool/other roles and
+        // empty nodes, so every message is expressible.
+        _ => true,
+    }
+}
+
+fn verify_readback(
     canonical: &CanonicalSession,
     readback: &CanonicalSession,
     provider_slug: &str,
-) -> Option<String> {
+) -> ReadbackCheck {
+    let mut warnings = Vec::new();
+
     // Codex and OpenCode split each tool interaction into two response
     // items on the wire (a `function_call` + `function_call_output` pair in
     // Codex; a `tool` + tool_result part in OpenCode). The reader reflects
@@ -917,53 +1032,108 @@ fn readback_mismatch_detail(
         let orig_events = count_logical_events(&canonical.messages);
         let rb_events = count_logical_events(&readback.messages);
         if orig_events != rb_events {
-            return Some(format!(
-                "logical event count mismatch: wrote {} events, read back {}",
-                orig_events, rb_events
-            ));
+            return ReadbackCheck {
+                mismatch: Some(format!(
+                    "logical event count mismatch: wrote {} events, read back {}",
+                    orig_events, rb_events
+                )),
+                warnings,
+            };
         }
-        // Codex readback aligns tool events to one-message-per-response-item
-        // (a single OMP message with text + tool_call + tool_result becomes
-        // 1 message envelope + 1 function_call + 1 function_call_output =
-        // 3 readback messages). Per-position content comparison is not
-        // meaningful here — the structural event count check above is the
-        // strong invariant.
-        return None;
-    } else if readback.messages.len() != canonical.messages.len() {
-        return Some(format!(
-            "message count mismatch: wrote {} messages, read back {}",
-            canonical.messages.len(),
-            readback.messages.len()
-        ));
+        // Event counts alone cannot detect mangled content: compare the
+        // multiset of content/tool-call/tool-result hashes as well.
+        let orig_atoms = codex_content_atom_multiset(&canonical.messages);
+        let rb_atoms = codex_content_atom_multiset(&readback.messages);
+        if orig_atoms != rb_atoms {
+            return ReadbackCheck {
+                mismatch: Some(format!(
+                    "content mismatch: wrote {} content atoms, read back {} ({} differ)",
+                    orig_atoms.len(),
+                    rb_atoms.len(),
+                    orig_atoms.iter().filter(|a| !rb_atoms.contains(a)).count()
+                        + rb_atoms.iter().filter(|a| !orig_atoms.contains(a)).count()
+                )),
+                warnings,
+            };
+        }
+        return ReadbackCheck {
+            mismatch: None,
+            warnings,
+        };
     }
 
-    // OpenCode stores messages in SQLite and reads them back ordered by
-    // `(created_at ASC, id ASC)`. When source timestamps are non-monotonic or
-    // when synthetic timestamps are used, read-back order can differ from the
-    // canonical order. Compare aggregate role bucket distributions instead of
-    // per-position roles to avoid spurious positional mismatches.
-    if provider_slug == "opencode" {
-        let mut orig_buckets: HashMap<&str, usize> = HashMap::new();
-        let mut rb_buckets: HashMap<&str, usize> = HashMap::new();
-        for msg in &canonical.messages {
-            *orig_buckets
-                .entry(readback_role_bucket(&msg.role, "opencode"))
-                .or_insert(0) += 1;
-        }
-        for msg in &readback.messages {
-            *rb_buckets
-                .entry(readback_role_bucket(&msg.role, "opencode"))
-                .or_insert(0) += 1;
-        }
-        if orig_buckets != rb_buckets {
-            return Some(format!(
-                "role bucket mismatch: original {:?}, read back {:?}",
-                orig_buckets, rb_buckets
+    // Providers whose storage cannot represent every canonical message
+    // losslessly verify only the expressible subset and warn about the rest
+    // instead of failing on content the format never promised to keep.
+    if matches!(provider_slug, "chatgpt" | "cursor" | "opencode") {
+        let keep = |m: &CanonicalMessage| is_expressible_for_provider(m, provider_slug);
+        let dropped = canonical.messages.iter().filter(|m| !keep(m)).count();
+        if dropped > 0 {
+            warnings.push(format!(
+                "{dropped} message(s) contain only empty content and cannot be represented \
+in the {provider_slug} format; they are absent from the written session's read-back."
             ));
         }
-        // Content comparison is skipped for OpenCode — the build_parts/
-        // parse_parts roundtrip is inherently lossy.
-        return None;
+        // ChatGPT stores message text only — structured tool calls/results
+        // do not survive the round-trip (their text was already synthesized
+        // into `content` by the pipeline where applicable).
+        if provider_slug == "chatgpt" {
+            let tool_msgs = canonical
+                .messages
+                .iter()
+                .filter(|m| !m.tool_calls.is_empty() || !m.tool_results.is_empty())
+                .count();
+            if tool_msgs > 0 {
+                warnings.push(format!(
+                    "{tool_msgs} message(s) carried tool call/result metadata that the ChatGPT \
+format cannot represent; only their text content round-trips."
+                ));
+            }
+        }
+        // Cursor bubbles carry at most one tool-call id each.
+        if provider_slug == "cursor" {
+            let multi_tool = canonical
+                .messages
+                .iter()
+                .filter(|m| m.tool_calls.len() + m.tool_results.len() > 1)
+                .count();
+            if multi_tool > 0 {
+                warnings.push(format!(
+                    "{multi_tool} message(s) had multiple tool calls/results; Cursor bubbles \
+store only one tool-call id, so the rest are not recoverable on read-back."
+                ));
+            }
+        }
+
+        let orig_atoms = role_content_multiset(&canonical.messages, provider_slug, keep);
+        let rb_atoms = role_content_multiset(&readback.messages, provider_slug, keep);
+        if orig_atoms != rb_atoms {
+            return ReadbackCheck {
+                mismatch: Some(format!(
+                    "content mismatch: wrote {} expressible messages, read back {} ({} differ)",
+                    orig_atoms.len(),
+                    rb_atoms.len(),
+                    orig_atoms.iter().filter(|a| !rb_atoms.contains(a)).count()
+                        + rb_atoms.iter().filter(|a| !orig_atoms.contains(a)).count()
+                )),
+                warnings,
+            };
+        }
+        return ReadbackCheck {
+            mismatch: None,
+            warnings,
+        };
+    }
+
+    if readback.messages.len() != canonical.messages.len() {
+        return ReadbackCheck {
+            mismatch: Some(format!(
+                "message count mismatch: wrote {} messages, read back {}",
+                canonical.messages.len(),
+                readback.messages.len()
+            )),
+            warnings,
+        };
     }
 
     for (i, (orig, rb)) in canonical
@@ -975,21 +1145,30 @@ fn readback_mismatch_detail(
         let orig_bucket = readback_role_bucket(&orig.role, provider_slug);
         let rb_bucket = readback_role_bucket(&rb.role, provider_slug);
         if orig_bucket != rb_bucket {
-            return Some(format!(
-                "message role mismatch at idx {i}: wrote {:?}, read back {:?}",
-                orig.role, rb.role
-            ));
+            return ReadbackCheck {
+                mismatch: Some(format!(
+                    "message role mismatch at idx {i}: wrote {:?}, read back {:?}",
+                    orig.role, rb.role
+                )),
+                warnings,
+            };
         }
         if orig.content != rb.content {
-            return Some(format!(
-                "message content mismatch at idx {i}: wrote {} bytes, read back {} bytes",
-                orig.content.len(),
-                rb.content.len()
-            ));
+            return ReadbackCheck {
+                mismatch: Some(format!(
+                    "message content mismatch at idx {i}: wrote {} bytes, read back {} bytes",
+                    orig.content.len(),
+                    rb.content.len()
+                )),
+                warnings,
+            };
         }
     }
 
-    None
+    ReadbackCheck {
+        mismatch: None,
+        warnings,
+    }
 }
 
 /// Count "logical events" used for Codex readback verification. Each

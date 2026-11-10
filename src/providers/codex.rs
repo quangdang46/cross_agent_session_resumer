@@ -1368,6 +1368,16 @@ impl Codex {
             "source".into(),
             serde_json::Value::String("codex".to_string()),
         );
+        if skipped > 0 {
+            // Surfaced by the pipeline as a conversion warning so malformed
+            // source lines are visible in `--json` output, not just logs.
+            metadata.insert(
+                "casr_read_warnings".into(),
+                serde_json::json!([format!(
+                    "Skipped {skipped} malformed or unreadable line(s) while reading the Codex session."
+                )]),
+            );
+        }
 
         debug!(
             session_id,
