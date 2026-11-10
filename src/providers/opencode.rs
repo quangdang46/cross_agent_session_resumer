@@ -926,8 +926,20 @@ impl Provider for OpenCode {
             }
         }
 
+        let mut warnings = Vec::new();
         match schema {
-            SchemaKind::V2 => Self::write_session_v2(&mut conn, session, &target_session_id)?,
+            SchemaKind::V2 => {
+                let tool_outputs = build_tool_output_map(session);
+                Self::write_session_v2(&mut conn, session, &target_session_id, &tool_outputs)?;
+                let orphan_results = count_orphan_tool_results(session);
+                if orphan_results > 0 {
+                    warnings.push(format!(
+                        "{orphan_results} tool result(s) reference a tool call that does not exist \
+in this session; OpenCode stores tool output on the call's `tool` part, so their \
+content is not preserved as structured output (any synthesized message text still is)."
+                    ));
+                }
+            }
             SchemaKind::Legacy => {
                 Self::write_session_legacy(&mut conn, session, &target_session_id)?;
             }
@@ -947,7 +959,7 @@ impl Provider for OpenCode {
             session_id: target_session_id.clone(),
             resume_command: self.resume_command(&target_session_id),
             backup_path: None,
-            warnings: Vec::new(),
+            warnings,
         })
     }
 
@@ -1152,6 +1164,7 @@ impl OpenCode {
         conn: &mut Connection,
         session: &CanonicalSession,
         target_session_id: &str,
+        tool_outputs: &ToolOutputMap,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
         let created_at = session.started_at.unwrap_or(now);
@@ -1315,7 +1328,7 @@ impl OpenCode {
             .with_context(|| format!("failed to insert OpenCode v2 message {}", msg.idx))?;
 
             // Emit flat part rows (v2 shape: type/text at top level, not nested data).
-            let part_specs = build_parts_v2(msg);
+            let part_specs = build_parts_v2(msg, tool_outputs);
             for part_data in part_specs {
                 let part_id = Self::mint_entity_id("prt_");
                 let mut pdata = part_data;
@@ -1386,9 +1399,63 @@ fn slug_from_title(title: &str) -> String {
     }
 }
 
+/// Session-wide index of tool-call id → `(output, is_error)` harvested from
+/// every message's `tool_results`.
+///
+/// Canonical messages (e.g. from Claude Code) typically carry `tool_calls` on
+/// the assistant turn and the matching `tool_results` on a LATER message, so
+/// a per-message lookup can never pair them. OpenCode's `tool` part stores
+/// call and result together in `state.output`, so the writer resolves outputs
+/// against this session-wide map instead.
+type ToolOutputMap = HashMap<String, (String, bool)>;
+
+fn build_tool_output_map(session: &CanonicalSession) -> ToolOutputMap {
+    let mut map = ToolOutputMap::new();
+    for msg in &session.messages {
+        for result in &msg.tool_results {
+            let Some(call_id) = result.call_id.as_deref() else {
+                continue;
+            };
+            if call_id.is_empty() {
+                continue;
+            }
+            map.entry(call_id.to_string())
+                .or_insert_with(|| (result.content.clone(), result.is_error));
+        }
+    }
+    map
+}
+
+/// Count tool results that no `tool_calls` entry claims — their content has
+/// no native OpenCode representation (a `tool` part needs a call to hang
+/// `state.output` on) and would be silently dropped by the writer.
+fn count_orphan_tool_results(session: &CanonicalSession) -> usize {
+    let call_ids: std::collections::HashSet<&str> = session
+        .messages
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .filter_map(|tc| tc.id.as_deref())
+        .collect();
+    session
+        .messages
+        .iter()
+        .flat_map(|m| m.tool_results.iter())
+        .filter(|tr| {
+            !tr.content.trim().is_empty()
+                && tr
+                    .call_id
+                    .as_deref()
+                    .is_none_or(|id| !call_ids.contains(id))
+        })
+        .count()
+}
+
 /// V2 part rows store flat objects (`{"type":"text","text":"..."}`), not the
 /// legacy nested `{"type":"text","data":{...}}` envelope.
-fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
+fn build_parts_v2(
+    message: &CanonicalMessage,
+    tool_outputs: &ToolOutputMap,
+) -> Vec<serde_json::Value> {
     let mut parts = Vec::new();
 
     if !message.content.trim().is_empty() {
@@ -1410,12 +1477,13 @@ fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
         } else {
             call.arguments.clone()
         };
-        let output = message
-            .tool_results
-            .iter()
-            .find(|tr| tr.call_id.as_deref() == call.id.as_deref())
-            .map(|tr| tr.content.clone())
+        let (output, is_error) = call
+            .id
+            .as_deref()
+            .and_then(|id| tool_outputs.get(id))
+            .cloned()
             .unwrap_or_default();
+        let status = if is_error { "error" } else { "completed" };
         let ts = message.timestamp.unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1427,7 +1495,7 @@ fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
             "tool": call.name,
             "callID": call.id.clone().unwrap_or_default(),
             "state": {
-                "status": "completed",
+                "status": status,
                 "input": input,
                 "output": output,
                 "metadata": {},
@@ -1437,16 +1505,12 @@ fn build_parts_v2(message: &CanonicalMessage) -> Vec<serde_json::Value> {
         }));
     }
 
-    for result in &message.tool_results {
-        // Tool results in v2 often live as tool-state updates; emit a text
-        // fallback so content is not dropped when the CLI only surfaces text.
-        if !result.content.trim().is_empty() {
-            parts.push(serde_json::json!({
-                "type": "text",
-                "text": result.content,
-            }));
-        }
-    }
+    // NOTE: tool results are deliberately NOT emitted as `text` parts. The
+    // reader joins every text part into `content`, so duplicating result
+    // output there corrupts the round-trip (the read-back message content
+    // gains the result text verbatim) and fails verification. Matched
+    // results already live in `state.output` above; orphans are reported by
+    // `count_orphan_tool_results` as a write warning instead.
 
     if parts.is_empty() {
         parts.push(serde_json::json!({
@@ -1718,6 +1782,92 @@ mod tests {
         (tmp, workspace, db, cwd, env)
     }
 
+    /// Minimal OpenCode ≥1.17 (v2) schema — mirrors the real
+    /// `~/.local/share/opencode/opencode.db` layout so tests exercise
+    /// `write_session_v2`/`read_session_v2` instead of the legacy path.
+    fn init_v2_schema(db: &Path) {
+        let conn = Connection::open(db).expect("open v2 test db");
+        conn.execute_batch(
+            r#"
+CREATE TABLE `project` (
+    `id` text PRIMARY KEY,
+    `worktree` text NOT NULL,
+    `vcs` text,
+    `name` text,
+    `icon_url` text,
+    `icon_url_override` text,
+    `icon_color` text,
+    `time_created` integer NOT NULL,
+    `time_updated` integer NOT NULL,
+    `time_initialized` integer,
+    `sandboxes` text NOT NULL,
+    `commands` text,
+    `time_active` integer DEFAULT 0 NOT NULL,
+    `time_archived` integer
+);
+CREATE TABLE `session` (
+    `id` text PRIMARY KEY,
+    `project_id` text NOT NULL,
+    `workspace_id` text,
+    `parent_id` text,
+    `slug` text NOT NULL,
+    `directory` text NOT NULL,
+    `path` text,
+    `title` text NOT NULL,
+    `version` text NOT NULL,
+    `share_url` text,
+    `summary_additions` integer,
+    `summary_deletions` integer,
+    `summary_files` integer,
+    `summary_diffs` text,
+    `metadata` text,
+    `cost` real DEFAULT 0 NOT NULL,
+    `tokens_input` integer DEFAULT 0 NOT NULL,
+    `tokens_output` integer DEFAULT 0 NOT NULL,
+    `tokens_reasoning` integer DEFAULT 0 NOT NULL,
+    `tokens_cache_read` integer DEFAULT 0 NOT NULL,
+    `tokens_cache_write` integer DEFAULT 0 NOT NULL,
+    `revert` text,
+    `permission` text,
+    `agent` text,
+    `model` text,
+    `time_created` integer NOT NULL,
+    `time_updated` integer NOT NULL,
+    `time_compacting` integer,
+    `time_archived` integer
+);
+CREATE TABLE `message` (
+    `id` text PRIMARY KEY,
+    `session_id` text NOT NULL,
+    `time_created` integer NOT NULL,
+    `time_updated` integer NOT NULL,
+    `data` text NOT NULL
+);
+CREATE TABLE `part` (
+    `id` text PRIMARY KEY,
+    `message_id` text NOT NULL,
+    `session_id` text NOT NULL,
+    `time_created` integer NOT NULL,
+    `time_updated` integer NOT NULL,
+    `data` text NOT NULL
+);
+"#,
+        )
+        .expect("init v2 schema");
+    }
+
+    /// Temp workspace + isolated v2-schema OpenCode DB for write tests.
+    fn test_workspace_v2() -> (tempfile::TempDir, PathBuf, PathBuf, CwdGuard, EnvDbGuard) {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".opencode")).expect("workspace dir");
+        let db = workspace.join(".opencode/opencode.db");
+        init_v2_schema(&db);
+        let cwd = CwdGuard::change_to(&workspace);
+        let env = EnvDbGuard::pin(&db);
+        (tmp, workspace, db, cwd, env)
+    }
+
     fn same_virtual_session(a: &Path, b: &Path) -> bool {
         match (
             OpenCode::parse_virtual_path(a),
@@ -1852,6 +2002,147 @@ mod tests {
         assert_eq!(readback.workspace.as_deref(), Some(workspace.as_path()));
         // Target id is source id with required `ses_` prefix.
         assert_eq!(readback.session_id, format!("ses_{}", source.session_id));
+    }
+
+    /// Regression for bd-opencode-verify-content-mismatch-s3f: on v2-schema
+    /// DBs the writer emitted every `tool_results` entry as an extra `text`
+    /// part, and the reader joins all text parts into `content` — so any
+    /// message carrying tool results read back with the result text appended
+    /// (e.g. "Inspecting now.\nRead complete"), failing the pipeline's
+    /// content-hash verification on real sessions.
+    ///
+    /// Tool output belongs to the `tool` part's `state.output`, not the text
+    /// channel. This test mirrors the Claude Code shape where the
+    /// `tool_calls` and `tool_results` live on DIFFERENT canonical messages.
+    #[test]
+    fn writer_reader_v2_roundtrip_preserves_content_with_tool_parts() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let (_tmp, workspace, _db, _cwd, _env) = test_workspace_v2();
+
+        let source = CanonicalSession {
+            session_id: "cc-source".to_string(),
+            provider_slug: "claude-code".to_string(),
+            workspace: Some(workspace.to_path_buf()),
+            title: Some("Tool heavy session".to_string()),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_020_000),
+            messages: vec![
+                CanonicalMessage {
+                    idx: 0,
+                    role: MessageRole::User,
+                    content: "Run the tests".to_string(),
+                    timestamp: Some(1_700_000_000_000),
+                    author: None,
+                    tool_calls: vec![],
+                    tool_results: vec![],
+                    extra: serde_json::json!({}),
+                },
+                CanonicalMessage {
+                    idx: 1,
+                    role: MessageRole::Assistant,
+                    content: "Running cargo test.".to_string(),
+                    timestamp: Some(1_700_000_005_000),
+                    author: None,
+                    tool_calls: vec![ToolCall {
+                        id: Some("call-1".to_string()),
+                        name: "Bash".to_string(),
+                        arguments: serde_json::json!({"command": "cargo test"}),
+                    }],
+                    tool_results: vec![],
+                    extra: serde_json::json!({}),
+                },
+                // Claude Code carries tool_result blocks on a separate user
+                // message; the pipeline synthesizes readable content for it.
+                CanonicalMessage {
+                    idx: 2,
+                    role: MessageRole::User,
+                    content: "[Tool Output] all tests passed".to_string(),
+                    timestamp: Some(1_700_000_006_000),
+                    author: None,
+                    tool_calls: vec![],
+                    tool_results: vec![ToolResult {
+                        call_id: Some("call-1".to_string()),
+                        content: "all tests passed".to_string(),
+                        is_error: false,
+                    }],
+                    extra: serde_json::json!({}),
+                },
+                // Same-message call+result pair must also round-trip.
+                CanonicalMessage {
+                    idx: 3,
+                    role: MessageRole::Assistant,
+                    content: "Reading the file.".to_string(),
+                    timestamp: Some(1_700_000_010_000),
+                    author: None,
+                    tool_calls: vec![ToolCall {
+                        id: Some("call-2".to_string()),
+                        name: "Read".to_string(),
+                        arguments: serde_json::json!({"path": "src/main.rs"}),
+                    }],
+                    tool_results: vec![ToolResult {
+                        call_id: Some("call-2".to_string()),
+                        content: "fn main() {}".to_string(),
+                        is_error: false,
+                    }],
+                    extra: serde_json::json!({}),
+                },
+            ],
+            metadata: serde_json::json!({}),
+            source_path: workspace.join("source.jsonl"),
+            model_name: None,
+        };
+
+        let written = OpenCode
+            .write_session(
+                &source,
+                &WriteOptions {
+                    force: false,
+                    target_session_id: None,
+                },
+            )
+            .expect("v2 write should succeed");
+
+        let readback = OpenCode
+            .read_session(&written.paths[0])
+            .expect("v2 readback should succeed");
+
+        assert_eq!(readback.messages.len(), source.messages.len());
+        for (i, (orig, rb)) in source
+            .messages
+            .iter()
+            .zip(readback.messages.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                rb.content, orig.content,
+                "message {i} content must round-trip verbatim"
+            );
+        }
+
+        // The cross-message tool result must land on the tool part's
+        // state.output so OpenCode renders the tool output on resume.
+        let db_path = written.paths[0].parent().expect("db parent");
+        let conn = OpenCode::open_db(db_path).expect("open written db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.data FROM part p
+                 JOIN message m ON m.id = p.message_id
+                 WHERE json_extract(p.data, '$.type') = 'tool'
+                   AND json_extract(p.data, '$.callID') = 'call-1'",
+            )
+            .expect("prepare tool part query");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query tool parts");
+        let mut found_output = false;
+        for row in rows {
+            let data: serde_json::Value =
+                serde_json::from_str(&row.expect("part row")).expect("part json");
+            if data.pointer("/state/output").and_then(|v| v.as_str()) == Some("all tests passed") {
+                found_output = true;
+            }
+        }
+        assert!(found_output, "tool part for call-1 must carry state.output");
     }
 
     /// Regression for #14: writing the same OpenCode session twice must fail
