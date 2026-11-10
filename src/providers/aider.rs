@@ -484,13 +484,26 @@ impl Provider for Aider {
     fn write_session(
         &self,
         session: &CanonicalSession,
-        _opts: &WriteOptions,
+        opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
+        // Aider session ids are derived from the `# aider chat started at
+        // <timestamp>` header, so the id must stay timestamp-shaped. When the
+        // pipeline supplies a deterministic `target_session_id`, derive the
+        // timestamp from it (same seed → same session id → re-runs conflict or
+        // overwrite instead of silently duplicating the transcript).
+        let now = match opts
+            .target_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(seed) => deterministic_aider_time(seed),
+            None => chrono::Utc::now(),
+        };
         // Use a single Utc::now() sample so the virtual path's session id and
         // the file's parsed session id cannot drift across a second boundary
         // (which would cause the read-back to silently match the wrong
         // existing session in a multi-session history file).
-        let now = chrono::Utc::now();
         let target_session_id = now.format("%Y-%m-%dT%H-%M-%S").to_string();
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -514,14 +527,24 @@ impl Provider for Aider {
         // Build the Aider Markdown content.
         let mut output = String::new();
 
-        // If the file exists, preserve its contents.
+        // Aider appends sessions to a shared history file. If a session block
+        // with this deterministic id already exists, honor --force semantics:
+        // conflict without it, replace the stale block with it.
         if target_path.exists()
             && let Ok(existing_content) = std::fs::read_to_string(&target_path)
         {
-            output.push_str(&existing_content);
-            if !output.ends_with('\n') {
-                output.push('\n');
+            let (found, kept) = strip_aider_session_blocks(&existing_content, &target_session_id);
+            if found && !opts.force {
+                return Err(crate::error::CasrError::SessionConflict {
+                    session_id: target_session_id.clone(),
+                    existing_path: target_path.clone(),
+                }
+                .into());
             }
+            output.push_str(&kept);
+        }
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
         }
 
         output.push_str(&format!("\n# aider chat started at {now_str}\n\n"));
@@ -637,6 +660,65 @@ fn parse_session_header(line: &str) -> Option<String> {
 /// `"2024-08-05 19:33:02"` → `"2024-08-05T19-33-02"`
 fn timestamp_to_session_id(timestamp: &str) -> String {
     timestamp.replace(' ', "T").replace(':', "-")
+}
+
+/// Map an arbitrary seed string to a deterministic datetime for the Aider
+/// session header. Same seed → same timestamp → same derived session id, so
+/// the pipeline's `target_session_id` produces idempotent conversions even
+/// though Aider's id format is timestamp-shaped.
+fn deterministic_aider_time(seed: &str) -> chrono::DateTime<chrono::Utc> {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(seed.as_bytes());
+    let raw = u64::from_be_bytes(digest[..8].try_into().expect("digest is 32 bytes"));
+    // 2020-01-01 .. ~2083-11-20 in epoch seconds.
+    let secs = 1_577_836_800i64 + (raw % 2_000_000_000) as i64;
+    chrono::DateTime::from_timestamp(secs, 0).unwrap_or_else(chrono::Utc::now)
+}
+
+/// Remove session blocks whose derived id equals `session_id` from aider
+/// history `content`. Returns `(found, kept_content)` where `kept_content`
+/// preserves the preamble and all non-matching session blocks verbatim.
+fn strip_aider_session_blocks(content: &str, session_id: &str) -> (bool, String) {
+    let mut found = false;
+    let mut kept = String::with_capacity(content.len());
+    // `block` accumulates the current session block (header + body). Before
+    // the first header it holds the file preamble.
+    let mut block = String::new();
+    let mut block_id: Option<String> = None;
+    let mut in_block = false;
+
+    for line in content.lines() {
+        if let Some(ts) = parse_session_header(line) {
+            // Flush the previous block (or the preamble).
+            if in_block {
+                if block_id.as_deref() == Some(session_id) {
+                    found = true;
+                } else {
+                    kept.push_str(&block);
+                }
+            } else {
+                kept.push_str(&block);
+            }
+            block.clear();
+            block_id = Some(timestamp_to_session_id(&ts));
+            in_block = true;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+
+    // Flush the trailing block.
+    if in_block {
+        if block_id.as_deref() == Some(session_id) {
+            found = true;
+        } else {
+            kept.push_str(&block);
+        }
+    } else {
+        kept.push_str(&block);
+    }
+
+    (found, kept)
 }
 
 /// Parse an Aider timestamp string into epoch milliseconds.

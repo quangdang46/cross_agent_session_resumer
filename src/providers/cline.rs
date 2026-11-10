@@ -317,9 +317,26 @@ impl Cline {
         Err(anyhow::anyhow!(msg))
     }
 
-    fn generate_task_id(storage_root: &Path) -> String {
+    fn generate_task_id(storage_root: &Path, seed: Option<&str>) -> String {
         let tasks_root = Self::tasks_root(storage_root);
-        let mut candidate: i64 = chrono::Utc::now().timestamp_millis();
+        // Cline task ids are millisecond timestamps. When the pipeline supplies
+        // a deterministic `target_session_id`, derive a stable numeric id from
+        // it and return it verbatim: bumping on collision would make the second
+        // run of the same conversion target a *different* id, defeating both
+        // idempotency and --force. Existence is enforced per-file by
+        // `atomic_write` (conflict without force, overwrite with it).
+        let seeded = seed.map(str::trim).filter(|s| !s.is_empty()).map(|seed| {
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(seed.as_bytes());
+            let raw = u64::from_be_bytes(digest[..8].try_into().expect("8 bytes"));
+            // Map into a plausible epoch-millis range (2001-01-01 ..
+            // ~2105-01-01) so the id looks native to Cline.
+            1_000_000_000_000i64 + (raw % 3_000_000_000_000) as i64
+        });
+        if let Some(id) = seeded {
+            return id.to_string();
+        }
+        let mut candidate = chrono::Utc::now().timestamp_millis();
         loop {
             let id = candidate.to_string();
             if !tasks_root.join(&id).exists() {
@@ -770,7 +787,8 @@ impl Provider for Cline {
     ) -> anyhow::Result<WrittenSession> {
         let storage_root = Self::pick_storage_root_for_write()?;
 
-        let target_task_id = Self::generate_task_id(&storage_root);
+        let target_task_id =
+            Self::generate_task_id(&storage_root, opts.target_session_id.as_deref());
         let task_dir = Self::tasks_root(&storage_root).join(&target_task_id);
         std::fs::create_dir_all(&task_dir)
             .with_context(|| format!("failed to create {}", task_dir.display()))?;
@@ -1370,9 +1388,24 @@ mod tests {
         let tasks = root.path().join("tasks");
         std::fs::create_dir_all(&tasks).expect("create tasks dir");
 
-        let id = Cline::generate_task_id(root.path());
+        let id = Cline::generate_task_id(root.path(), None);
         // Should be a numeric string (epoch millis).
         assert!(id.parse::<i64>().is_ok(), "task id should be numeric: {id}");
+    }
+
+    #[test]
+    fn writer_task_id_is_deterministic_for_same_seed() {
+        let root = tempfile::tempdir().expect("tmpdir");
+        let tasks = root.path().join("tasks");
+        std::fs::create_dir_all(&tasks).expect("create tasks dir");
+
+        let id1 = Cline::generate_task_id(root.path(), Some("casr-cc-abc"));
+        let id2 = Cline::generate_task_id(root.path(), Some("casr-cc-abc"));
+        assert_eq!(id1, id2, "same seed must produce same task id");
+        assert!(id1.parse::<i64>().is_ok(), "task id should be numeric");
+
+        let id3 = Cline::generate_task_id(root.path(), Some("casr-cod-xyz"));
+        assert_ne!(id1, id3, "different seeds should differ");
     }
 
     #[test]
@@ -1382,10 +1415,10 @@ mod tests {
         std::fs::create_dir_all(&tasks).expect("create tasks dir");
 
         // Pre-create a task directory to force collision handling.
-        let id1 = Cline::generate_task_id(root.path());
+        let id1 = Cline::generate_task_id(root.path(), None);
         std::fs::create_dir_all(tasks.join(&id1)).expect("create collision dir");
 
-        let id2 = Cline::generate_task_id(root.path());
+        let id2 = Cline::generate_task_id(root.path(), None);
         assert_ne!(id1, id2, "should generate different ID on collision");
         assert!(id2.parse::<i64>().is_ok(), "collision id should be numeric");
     }

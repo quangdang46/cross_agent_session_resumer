@@ -610,19 +610,17 @@ impl PiEngine {
     ) -> anyhow::Result<WrittenSession> {
         // Pi-Agent filenames must contain an underscore to be discoverable
         // by `owns_session`. Convention: `<timestamp>_<uuid>.jsonl`.
-        let session_id = if session.session_id.is_empty() {
-            let now = chrono::Utc::now();
-            format!(
-                "{}_casr-{}",
-                now.format("%Y-%m-%dT%H-%M-%S"),
-                uuid::Uuid::new_v4()
-            )
-        } else if session.session_id.contains('_') {
-            session.session_id.clone()
+        //
+        // The id becomes a filename stem, so it must be sanitized (the source
+        // session id is untrusted) and prefer the pipeline's deterministic
+        // `target_session_id` so re-running a conversion is idempotent.
+        let base_id = crate::providers::resolve_write_session_id(opts, session);
+        let session_id = if base_id.contains('_') {
+            base_id
         } else {
-            // Incoming ID lacks underscore — prefix with timestamp.
-            let now = chrono::Utc::now();
-            format!("{}_{}", now.format("%Y-%m-%dT%H-%M-%S"), session.session_id)
+            // No underscore — prefix deterministically so the file stays
+            // discoverable without minting a fresh id per run.
+            format!("casr_{base_id}")
         };
 
         let home = self.home_dir();

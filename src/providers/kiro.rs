@@ -329,7 +329,17 @@ impl Provider for Kiro {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = uuid::Uuid::new_v4().to_string();
+        // Prefer the pipeline's deterministic id so re-running the same
+        // conversion overwrites/conflicts on the same files instead of
+        // minting a fresh UUID every time. Kiro session ids are UUID-shaped;
+        // sanitize anyway since the value becomes a filename stem.
+        let target_session_id = opts
+            .target_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(crate::discovery::sanitize_session_id_for_path)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now();
 
         let dir = Self::sessions_dir()
