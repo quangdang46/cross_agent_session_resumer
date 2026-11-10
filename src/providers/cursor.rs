@@ -811,6 +811,16 @@ fn parse_bubble(
 ///
 /// Checks numeric `type` field first (v0.40+), then string `type`/`role` fields.
 fn determine_bubble_role(bubble: &serde_json::Value) -> MessageRole {
+    // casr-written bubbles encode roles Cursor cannot represent (System,
+    // Other) as Assistant bubbles carrying a `casr_role` tag; recover the
+    // original role before consulting the bubble type.
+    if let Some(tag) = bubble.get("casr_role").and_then(|v| v.as_str()) {
+        if let Some(rest) = tag.strip_prefix("other:") {
+            return MessageRole::Other(rest.to_string());
+        }
+        return normalize_role(tag);
+    }
+
     // Modern numeric type.
     if let Some(num_type) = bubble.get("type").and_then(|v| v.as_i64()) {
         return match num_type {
@@ -1498,6 +1508,34 @@ mod tests {
         assert_eq!(readback.messages[1].role, MessageRole::Assistant);
         assert_eq!(readback.messages[1].content, "Hi there!");
         assert_eq!(readback.messages[1].author.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn casr_role_tag_recovers_system_and_other() {
+        // Regression (bd-ms4): the writer encodes System/Other messages as
+        // Assistant bubbles carrying a `casr_role` tag; the reader must
+        // recover the original role or verification sees "wrote System,
+        // read back Assistant".
+        let sys = json!({
+            "text": "system note",
+            "type": BUBBLE_TYPE_ASSISTANT,
+            "casr_role": "system",
+        });
+        assert_eq!(determine_bubble_role(&sys), MessageRole::System);
+
+        let other = json!({
+            "text": "reviewer note",
+            "type": BUBBLE_TYPE_ASSISTANT,
+            "casr_role": "other:reviewer",
+        });
+        assert_eq!(
+            determine_bubble_role(&other),
+            MessageRole::Other("reviewer".to_string())
+        );
+
+        // Plain assistant bubbles are unaffected.
+        let plain = json!({"text": "hi", "type": BUBBLE_TYPE_ASSISTANT});
+        assert_eq!(determine_bubble_role(&plain), MessageRole::Assistant);
     }
 
     #[test]
