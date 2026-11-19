@@ -343,7 +343,10 @@ impl Provider for Antigravity {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("agy --conversation {session_id} --model \"{AGY_REQUIRED_MODEL}\"")
+        format!(
+            "agy --conversation {} --model \"{AGY_REQUIRED_MODEL}\"",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

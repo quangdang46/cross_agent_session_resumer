@@ -235,6 +235,15 @@ impl PiEngine {
             .collect()
     }
 
+    /// Read at most `max` leading bytes of a file (fewer at EOF).
+    fn read_head_bytes(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> {
+        use std::io::Read as _;
+        let mut file = std::fs::File::open(path)?;
+        let mut buf = Vec::with_capacity(max.min(8192));
+        file.by_ref().take(max as u64).read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
     /// Check whether a candidate file's content is a pi-agent/omp session.
     ///
     /// Scans the first JSONL entries (bounded read) for a known type
@@ -347,9 +356,10 @@ impl PiEngine {
             if !stem_match && !named_file {
                 continue;
             }
-            let buf = match std::fs::read(entry.path())
-                .or_else(|_| std::fs::read_to_string(entry.path()).map(String::into_bytes))
-            {
+            // Both scanners below only inspect the first 8 KiB / 8 lines, so
+            // read just that prefix instead of the whole (potentially large)
+            // session file.
+            let buf = match Self::read_head_bytes(entry.path(), 8192) {
                 Ok(buf) => buf,
                 Err(e) => {
                     trace!(
@@ -635,162 +645,173 @@ impl PiEngine {
             self.flavor.display_name()
         );
 
-        let mut lines: Vec<String> = Vec::new();
-
-        // Session header.
-        let workspace = session
-            .workspace
-            .as_ref()
-            .and_then(|w| w.to_str())
-            .unwrap_or("/tmp");
-        let header = serde_json::json!({
-            "type": "session",
-            "id": session_id,
-            "timestamp": session.started_at
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
-            "cwd": workspace,
-            "provider": session.metadata.get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or(session.provider_slug.as_str()),
-            "modelId": session.model_name.as_deref().unwrap_or("unknown"),
-        });
-        lines.push(serde_json::to_string(&header)?);
-
-        // Messages.
-        for msg in &session.messages {
-            // Skip messages that would produce empty content on read-back.
-            // Pi reader skips entries where content.trim().is_empty(), so
-            // we must ensure every written message survives the round-trip.
-            // Tool-result-only messages (empty content, no tool_calls, but
-            // with tool_results) get their content synthesized below.
-            let has_tool_data = !msg.tool_calls.is_empty() || !msg.tool_results.is_empty();
-            if msg.content.trim().is_empty() && !has_tool_data {
-                continue;
-            }
-
-            let role_str = match &msg.role {
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::System => "system",
-                MessageRole::Tool => "toolResult",
-                MessageRole::Other(r) => r.as_str(),
-            };
-
-            // For tool-result-only messages (empty content, no tool_calls),
-            // synthesize readable content from the tool results so the Pi
-            // reader won't skip the message on read-back.
-            let effective_content = if msg.content.trim().is_empty()
-                && msg.tool_calls.is_empty()
-                && !msg.tool_results.is_empty()
-            {
-                msg.tool_results
-                    .iter()
-                    .map(|tr| {
-                        if tr.is_error {
-                            format!("[Tool Error] {}", tr.content)
-                        } else {
-                            format!("[Tool Output] {}", tr.content)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                msg.content.clone()
-            };
-
-            // Build content: always an array of typed blocks so Pi's JS
-            // `message.content.some(...)` never receives a plain string.
-            //
-            // We intentionally emit only a text block here — no toolCall
-            // blocks.  Pi's reader (`flatten_content`) extracts text from
-            // both "text" AND "toolCall" blocks, so emitting both would
-            // cause the read-back content to double up (e.g. "[Tool: shell]"
-            // appearing in both the text block and the toolCall block).
-            // Since the pipeline already normalises tool-call / tool-result
-            // info into `effective_content`, a single text block is both
-            // sufficient and round-trip-safe.
-            let blocks = vec![serde_json::json!({
-                "type": "text",
-                "text": effective_content,
-            })];
-            let content = serde_json::Value::Array(blocks);
-
-            let mut inner = serde_json::json!({
-                "role": role_str,
-                "content": content,
-            });
-            if let Some(ref author) = msg.author {
-                inner["model"] = serde_json::Value::String(author.clone());
-            }
-
-            // Add usage field with the full structure Pi expects.
-            // Pi's footer.js sums: usage.input, usage.output, usage.cacheRead,
-            // usage.cacheWrite, and usage.cost.total — all must be present to
-            // avoid TypeError crashes.
-            let usage = msg
-                .extra
-                .get("message")
-                .and_then(|m| m.get("usage"))
-                .or_else(|| msg.extra.get("usage"))
-                .cloned()
-                .map(|mut u| {
-                    // Ensure all required fields exist even if the source
-                    // usage object is incomplete.
-                    let obj = u.as_object_mut();
-                    if let Some(map) = obj {
-                        for key in &["input", "output", "cacheRead", "cacheWrite", "totalTokens"] {
-                            map.entry((*key).to_string())
-                                .or_insert(serde_json::Value::Number(0.into()));
-                        }
-                        map.entry("cost".to_string()).or_insert_with(|| {
-                            serde_json::json!({
-                                "input": 0, "output": 0,
-                                "cacheRead": 0, "cacheWrite": 0, "total": 0
-                            })
-                        });
-                    }
-                    u
-                })
-                .unwrap_or_else(|| {
-                    serde_json::json!({
-                        "input": 0,
-                        "output": 0,
-                        "cacheRead": 0,
-                        "cacheWrite": 0,
-                        "totalTokens": 0,
-                        "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
-                            "total": 0
-                        }
-                    })
-                });
-            inner["usage"] = usage;
-
-            let ts_str = msg
-                .timestamp
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-
-            let entry = serde_json::json!({
-                "type": "message",
-                "timestamp": ts_str,
-                "message": inner,
-            });
-            lines.push(serde_json::to_string(&entry)?);
-        }
-
-        let file_content = lines.join("\n") + "\n";
-        let outcome = crate::pipeline::atomic_write(
+        // Stream JSONL lines to the temp file instead of materializing the
+        // whole session as a `Vec<String>` plus one joined copy.
+        let outcome = crate::pipeline::atomic_write_streaming(
             &target_path,
-            file_content.as_bytes(),
             opts.force,
             self.flavor.slug(),
+            |file| {
+                use std::io::Write as _;
+                let mut writer = std::io::BufWriter::new(file);
+
+                // Session header.
+                let workspace = session
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| w.to_str())
+                    .unwrap_or("/tmp");
+                let header = serde_json::json!({
+                    "type": "session",
+                    "id": session_id,
+                    "timestamp": session.started_at
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+                    "cwd": workspace,
+                    "provider": session.metadata.get("provider")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(session.provider_slug.as_str()),
+                    "modelId": session.model_name.as_deref().unwrap_or("unknown"),
+                });
+                let header_line = serde_json::to_string(&header).map_err(std::io::Error::other)?;
+                writeln!(writer, "{header_line}")?;
+
+                // Messages.
+                for msg in &session.messages {
+                    // Skip messages that would produce empty content on read-back.
+                    // Pi reader skips entries where content.trim().is_empty(), so
+                    // we must ensure every written message survives the round-trip.
+                    // Tool-result-only messages (empty content, no tool_calls, but
+                    // with tool_results) get their content synthesized below.
+                    let has_tool_data = !msg.tool_calls.is_empty() || !msg.tool_results.is_empty();
+                    if msg.content.trim().is_empty() && !has_tool_data {
+                        continue;
+                    }
+
+                    let role_str = match &msg.role {
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::System => "system",
+                        MessageRole::Tool => "toolResult",
+                        MessageRole::Other(r) => r.as_str(),
+                    };
+
+                    // For tool-result-only messages (empty content, no tool_calls),
+                    // synthesize readable content from the tool results so the Pi
+                    // reader won't skip the message on read-back.
+                    let effective_content = if msg.content.trim().is_empty()
+                        && msg.tool_calls.is_empty()
+                        && !msg.tool_results.is_empty()
+                    {
+                        msg.tool_results
+                            .iter()
+                            .map(|tr| {
+                                if tr.is_error {
+                                    format!("[Tool Error] {}", tr.content)
+                                } else {
+                                    format!("[Tool Output] {}", tr.content)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    } else {
+                        msg.content.clone()
+                    };
+
+                    // Build content: always an array of typed blocks so Pi's JS
+                    // `message.content.some(...)` never receives a plain string.
+                    //
+                    // We intentionally emit only a text block here — no toolCall
+                    // blocks.  Pi's reader (`flatten_content`) extracts text from
+                    // both "text" AND "toolCall" blocks, so emitting both would
+                    // cause the read-back content to double up (e.g. "[Tool: shell]"
+                    // appearing in both the text block and the toolCall block).
+                    // Since the pipeline already normalises tool-call / tool-result
+                    // info into `effective_content`, a single text block is both
+                    // sufficient and round-trip-safe.
+                    let blocks = vec![serde_json::json!({
+                        "type": "text",
+                        "text": effective_content,
+                    })];
+                    let content = serde_json::Value::Array(blocks);
+
+                    let mut inner = serde_json::json!({
+                        "role": role_str,
+                        "content": content,
+                    });
+                    if let Some(ref author) = msg.author {
+                        inner["model"] = serde_json::Value::String(author.clone());
+                    }
+
+                    // Add usage field with the full structure Pi expects.
+                    // Pi's footer.js sums: usage.input, usage.output, usage.cacheRead,
+                    // usage.cacheWrite, and usage.cost.total — all must be present to
+                    // avoid TypeError crashes.
+                    let usage = msg
+                        .extra
+                        .get("message")
+                        .and_then(|m| m.get("usage"))
+                        .or_else(|| msg.extra.get("usage"))
+                        .cloned()
+                        .map(|mut u| {
+                            // Ensure all required fields exist even if the source
+                            // usage object is incomplete.
+                            let obj = u.as_object_mut();
+                            if let Some(map) = obj {
+                                for key in
+                                    &["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
+                                {
+                                    map.entry((*key).to_string())
+                                        .or_insert(serde_json::Value::Number(0.into()));
+                                }
+                                map.entry("cost".to_string()).or_insert_with(|| {
+                                    serde_json::json!({
+                                        "input": 0, "output": 0,
+                                        "cacheRead": 0, "cacheWrite": 0, "total": 0
+                                    })
+                                });
+                            }
+                            u
+                        })
+                        .unwrap_or_else(|| {
+                            serde_json::json!({
+                                "input": 0,
+                                "output": 0,
+                                "cacheRead": 0,
+                                "cacheWrite": 0,
+                                "totalTokens": 0,
+                                "cost": {
+                                    "input": 0,
+                                    "output": 0,
+                                    "cacheRead": 0,
+                                    "cacheWrite": 0,
+                                    "total": 0
+                                }
+                            })
+                        });
+                    inner["usage"] = usage;
+
+                    let ts_str = msg
+                        .timestamp
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+                    let entry = serde_json::json!({
+                        "type": "message",
+                        "timestamp": ts_str,
+                        "message": inner,
+                    });
+                    let entry_line =
+                        serde_json::to_string(&entry).map_err(std::io::Error::other)?;
+                    writeln!(writer, "{entry_line}")?;
+                }
+
+                // Trailing newline parity with the old `join("\n") + "\n"` body: every
+                // line is `writeln!`-terminated, so the file always ends with `\n`.
+                writer.flush()
+            },
         )?;
 
         info!(
@@ -813,11 +834,14 @@ impl PiEngine {
     fn resume_command(&self, session_id: &str) -> String {
         let home = self.home_dir();
         let sessions_dir = home.join("sessions");
-        let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+        // The id becomes a filename component; sanitize so untrusted ids
+        // cannot traverse, then quote the whole path for the shell.
+        let safe_id = crate::discovery::sanitize_session_id_for_path(session_id);
+        let session_path = sessions_dir.join(format!("{safe_id}.jsonl"));
         format!(
             "{} --session {}",
             self.flavor.resume_binary(),
-            session_path.display()
+            crate::providers::shell_quote_arg(&session_path.to_string_lossy())
         )
     }
 }
@@ -1406,7 +1430,8 @@ mod tests {
         let provider = PiAgent;
         let cmd = provider.resume_command("my-session");
         assert!(cmd.starts_with("pi --session "), "got: {cmd}");
-        assert!(cmd.ends_with("/sessions/my-session.jsonl"), "got: {cmd}");
+        // Absolute paths are always single-quoted for the shell.
+        assert!(cmd.ends_with("/sessions/my-session.jsonl'"), "got: {cmd}");
     }
 
     #[test]
@@ -1414,7 +1439,7 @@ mod tests {
         let provider = Omp;
         let cmd = provider.resume_command("my-session");
         assert!(cmd.starts_with("omp --session "), "got: {cmd}");
-        assert!(cmd.ends_with("/sessions/my-session.jsonl"), "got: {cmd}");
+        assert!(cmd.ends_with("/sessions/my-session.jsonl'"), "got: {cmd}");
     }
 
     /// Regression test for issue #9: Codex→Pi session resumption crashed Pi

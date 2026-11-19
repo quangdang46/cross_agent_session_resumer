@@ -1256,11 +1256,13 @@ impl Provider for Grok {
         let sessions_root = Self::sessions_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot determine Grok home directory"))?;
 
-        let session_id = opts
-            .target_session_id
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let session_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        );
 
         let cwd = session
             .workspace
@@ -1303,12 +1305,54 @@ impl Provider for Grok {
         let chat_path = session_dir.join("chat_history.jsonl");
         let updates_path = session_dir.join("updates.jsonl");
 
-        let summary_out =
-            crate::pipeline::atomic_write(&summary_path, &summary_bytes, opts.force, self.slug())?;
+        // Record each outcome so a mid-sequence failure rolls the whole write
+        // back instead of leaving a half-written session.
+        let mut written_entries: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+
+        let summary_out = match crate::pipeline::atomic_write(
+            &summary_path,
+            &summary_bytes,
+            opts.force,
+            self.slug(),
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                let _ = std::fs::remove_dir(&session_dir);
+                return Err(e.into());
+            }
+        };
+        written_entries.push((
+            summary_out.target_path.clone(),
+            summary_out.backup_path.clone(),
+        ));
         let chat_out =
-            crate::pipeline::atomic_write(&chat_path, chat.as_bytes(), true, self.slug())?;
-        let updates_out =
-            crate::pipeline::atomic_write(&updates_path, updates.as_bytes(), true, self.slug())?;
+            match crate::pipeline::atomic_write(&chat_path, chat.as_bytes(), true, self.slug()) {
+                Ok(o) => o,
+                Err(e) => {
+                    crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                    let _ = std::fs::remove_dir(&session_dir);
+                    return Err(e.into());
+                }
+            };
+        written_entries.push((chat_out.target_path.clone(), chat_out.backup_path.clone()));
+        let updates_out = match crate::pipeline::atomic_write(
+            &updates_path,
+            updates.as_bytes(),
+            true,
+            self.slug(),
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                let _ = std::fs::remove_dir(&session_dir);
+                return Err(e.into());
+            }
+        };
+        written_entries.push((
+            updates_out.target_path.clone(),
+            updates_out.backup_path.clone(),
+        ));
 
         // Best-effort empty signals so tools that read them don't panic.
         let signals = json!({
@@ -1321,12 +1365,15 @@ impl Provider for Grok {
             "importedBy": "casr",
         });
         if let Ok(bytes) = serde_json::to_vec_pretty(&signals) {
-            let _ = crate::pipeline::atomic_write(
-                &session_dir.join("signals.json"),
-                &bytes,
-                true,
-                self.slug(),
-            );
+            let signals_path = session_dir.join("signals.json");
+            match crate::pipeline::atomic_write(&signals_path, &bytes, true, self.slug()) {
+                Ok(outcome) => written_entries.push((outcome.target_path, outcome.backup_path)),
+                Err(e) => {
+                    crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                    let _ = std::fs::remove_dir(&session_dir);
+                    return Err(e.into());
+                }
+            }
         }
 
         info!(
@@ -1350,7 +1397,10 @@ impl Provider for Grok {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("grok --resume {session_id}")
+        format!(
+            "grok --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

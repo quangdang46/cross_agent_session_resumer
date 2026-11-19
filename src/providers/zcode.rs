@@ -763,7 +763,7 @@ impl Provider for ZCode {
 
     fn resume_command(&self, session_id: &str) -> String {
         let id = Self::ensure_zc_prefix(session_id);
-        format!("zcode --resume {id}")
+        format!("zcode --resume {}", crate::providers::shell_quote_arg(&id))
     }
 
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {

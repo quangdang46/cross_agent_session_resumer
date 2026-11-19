@@ -454,9 +454,25 @@ impl Cline {
     ) -> anyhow::Result<Option<PathBuf>> {
         let history_path = Self::task_history_path(storage_root);
 
+        // Never silently discard an unreadable or non-array taskHistory.json:
+        // rewriting it would permanently drop every other task's entry.
         let mut items: Vec<serde_json::Value> = match Self::read_json(&history_path) {
             Ok(serde_json::Value::Array(arr)) => arr,
-            _ => Vec::new(),
+            Ok(_) => {
+                anyhow::bail!(
+                    "{} is valid JSON but not an array; refusing to overwrite",
+                    history_path.display()
+                )
+            }
+            Err(e) => {
+                if history_path.exists() {
+                    anyhow::bail!(
+                        "failed to read {}: {e:#}; refusing to overwrite",
+                        history_path.display()
+                    );
+                }
+                Vec::new()
+            }
         };
 
         // Remove any existing entry with the same id (defensive).
@@ -574,8 +590,11 @@ impl Provider for Cline {
     }
 
     fn owns_session(&self, session_id: &str) -> Option<PathBuf> {
+        // Task ids become directory names; sanitize so an untrusted id cannot
+        // traverse out of `tasks/`.
+        let session_id = crate::discovery::sanitize_session_id_for_path(session_id);
         for storage_root in Self::storage_roots() {
-            let task_dir = Self::tasks_root(&storage_root).join(session_id);
+            let task_dir = Self::tasks_root(&storage_root).join(&session_id);
             let api = task_dir.join(FILE_API_HISTORY);
             if api.is_file() {
                 return Some(api);
@@ -790,41 +809,91 @@ impl Provider for Cline {
         let target_task_id =
             Self::generate_task_id(&storage_root, opts.target_session_id.as_deref());
         let task_dir = Self::tasks_root(&storage_root).join(&target_task_id);
+
+        let api_path = task_dir.join(FILE_API_HISTORY);
+        let ui_path = task_dir.join(FILE_UI_MESSAGES);
+        let metadata_path = task_dir.join(FILE_TASK_METADATA);
+
+        // Pre-check conflicts on every target file BEFORE creating the task
+        // directory so a conflict leaves zero partial state behind.
+        for path in [&api_path, &ui_path, &metadata_path] {
+            if path.exists() && !opts.force {
+                return Err(crate::error::CasrError::SessionConflict {
+                    session_id: target_task_id.clone(),
+                    existing_path: path.clone(),
+                }
+                .into());
+            }
+        }
+
         std::fs::create_dir_all(&task_dir)
             .with_context(|| format!("failed to create {}", task_dir.display()))?;
+
+        // Record every successful write so a mid-sequence failure can roll the
+        // whole conversion back instead of leaving a half-written task.
+        let mut written: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+        let rollback_and_cleanup = |written: &[(PathBuf, Option<PathBuf>)]| {
+            crate::pipeline::rollback_partial_write(written, self.slug());
+            // `remove_dir` (not `remove_dir_all`) only succeeds when the task
+            // dir is empty, so pre-existing files are never touched.
+            let _ = std::fs::remove_dir(&task_dir);
+        };
 
         // 1) api_conversation_history.json
         let api_history = Self::build_api_history(session);
         let api_bytes =
             serde_json::to_vec(&api_history).context("failed to serialize api history")?;
-        let api_path = task_dir.join(FILE_API_HISTORY);
-        let _ = crate::pipeline::atomic_write(&api_path, &api_bytes, opts.force, self.slug())?;
+        match crate::pipeline::atomic_write(&api_path, &api_bytes, opts.force, self.slug()) {
+            Ok(outcome) => written.push((outcome.target_path, outcome.backup_path)),
+            Err(e) => {
+                rollback_and_cleanup(&written);
+                return Err(e.into());
+            }
+        }
 
         // 2) ui_messages.json
         let ui_messages = Self::build_ui_messages(session);
         let ui_bytes =
             serde_json::to_vec(&ui_messages).context("failed to serialize ui messages")?;
-        let ui_path = task_dir.join(FILE_UI_MESSAGES);
-        let _ = crate::pipeline::atomic_write(&ui_path, &ui_bytes, opts.force, self.slug())?;
+        match crate::pipeline::atomic_write(&ui_path, &ui_bytes, opts.force, self.slug()) {
+            Ok(outcome) => written.push((outcome.target_path, outcome.backup_path)),
+            Err(e) => {
+                rollback_and_cleanup(&written);
+                return Err(e.into());
+            }
+        }
 
         // 3) task_metadata.json (minimal)
-        let metadata_path = task_dir.join(FILE_TASK_METADATA);
         let metadata_bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "files_in_context": [],
             "model_usage": [],
             "environment_history": [],
         }))
         .context("failed to serialize task metadata")?;
-        let _ = crate::pipeline::atomic_write(
+        match crate::pipeline::atomic_write(
             &metadata_path,
             &metadata_bytes,
             opts.force,
             self.slug(),
-        )?;
+        ) {
+            Ok(outcome) => written.push((outcome.target_path, outcome.backup_path)),
+            Err(e) => {
+                rollback_and_cleanup(&written);
+                return Err(e.into());
+            }
+        }
 
         // 4) state/taskHistory.json (best-effort, but needed for Cline to list tasks)
-        let backup_path =
-            Self::update_task_history(&storage_root, &target_task_id, session, self.slug())?;
+        match Self::update_task_history(&storage_root, &target_task_id, session, self.slug()) {
+            Ok(backup_path) => {
+                written.push((Self::task_history_path(&storage_root), backup_path));
+            }
+            Err(e) => {
+                rollback_and_cleanup(&written);
+                return Err(e);
+            }
+        }
+        let backup_path = written.last().and_then(|(_, bak)| bak.clone());
 
         debug!(
             task_id = target_task_id,
@@ -844,6 +913,71 @@ impl Provider for Cline {
     fn resume_command(&self, _session_id: &str) -> String {
         // Cline has no CLI resume flag. Best effort: open the workspace in VS Code.
         "code .".to_string()
+    }
+
+    fn rollback_written(&self, written: &WrittenSession) -> anyhow::Result<()> {
+        // `written.backup_path` backs `state/taskHistory.json`, NOT
+        // `paths[0]` (the pipeline's filename guard skips it for that reason).
+        // Restore the shared history file here, then drop the task directory.
+        if let Some(bak) = &written.backup_path {
+            // The backup sits next to taskHistory.json as `taskHistory.json.bak*`.
+            if let Some(state_dir) = bak.parent() {
+                let history_path = state_dir.join(FILE_TASK_HISTORY);
+                match std::fs::remove_file(&history_path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        debug!(
+                            path = %history_path.display(),
+                            error = %e,
+                            "cline rollback: failed to remove rewritten taskHistory.json"
+                        );
+                    }
+                }
+                if let Err(e) = std::fs::rename(bak, &history_path) {
+                    debug!(
+                        backup = %bak.display(),
+                        target = %history_path.display(),
+                        error = %e,
+                        "cline rollback: failed to restore taskHistory.json backup"
+                    );
+                }
+            }
+        } else {
+            // No backup means taskHistory.json did not exist before our write
+            // (or our entry was appended to a file we created). Remove our
+            // entry; drop the file only if it held nothing else.
+            for storage_root in Self::candidate_storage_roots() {
+                let history_path = Self::task_history_path(&storage_root);
+                let Ok(serde_json::Value::Array(mut items)) = Self::read_json(&history_path) else {
+                    continue;
+                };
+                let before = items.len();
+                items.retain(|v| {
+                    v.get("id").and_then(|x| x.as_str()) != Some(written.session_id.as_str())
+                });
+                if items.len() == before {
+                    continue;
+                }
+                if items.is_empty() {
+                    let _ = std::fs::remove_file(&history_path);
+                } else if let Ok(bytes) =
+                    serde_json::to_vec_pretty(&serde_json::Value::Array(items))
+                {
+                    let _ = std::fs::write(&history_path, bytes);
+                }
+            }
+        }
+
+        // Remove the task directory we created (files already deleted by the
+        // pipeline rollback; `remove_dir_all` also covers anything left).
+        for storage_root in Self::candidate_storage_roots() {
+            let task_dir = Self::tasks_root(&storage_root).join(&written.session_id);
+            if task_dir.is_dir() {
+                let _ = std::fs::remove_dir_all(&task_dir);
+            }
+        }
+        Ok(())
     }
 }
 

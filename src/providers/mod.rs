@@ -68,6 +68,40 @@ pub(crate) fn resolve_write_session_id(opts: &WriteOptions, session: &CanonicalS
     format!("casr-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S"))
 }
 
+/// Quote a session id for safe interpolation into a POSIX shell command line.
+///
+/// Ids whose first char is `[A-Za-z0-9]` and whose remaining chars are in
+/// `[A-Za-z0-9._/:@,+%-]` pass through unquoted. Anything else is wrapped in
+/// single quotes with embedded `'` escaped as `'\''`. A leading `-` is always
+/// quoted so the value cannot be reparsed as a CLI flag.
+pub(crate) fn shell_quote_arg(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.chars().enumerate().all(|(i, c)| {
+            if i == 0 {
+                c.is_ascii_alphanumeric()
+            } else {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '_' | '/' | ':' | '@' | ',' | '+' | '%' | '-')
+            }
+        });
+    if safe {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// Escape a string for interpolation inside a double-quoted shell argument.
+pub(crate) fn shell_escape_dq(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len());
+    for c in arg.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Describes the files produced by a successful write operation.
 #[derive(Debug, Clone)]
 pub struct WrittenSession {
@@ -109,6 +143,24 @@ pub trait Provider: Send + Sync {
 
     /// Read a session from its native format into canonical IR.
     fn read_session(&self, path: &Path) -> anyhow::Result<CanonicalSession>;
+
+    /// Read only the trailing `tail_messages` of a session, for preview use
+    /// (`casr info --peek`). The default performs a full [`Provider::read_session`]
+    /// and drops the leading messages; JSONL providers may override with a
+    /// bounded reverse read. Session-level fields (id, workspace, timestamps,
+    /// metadata) are still populated.
+    fn read_session_tail(
+        &self,
+        path: &Path,
+        tail_messages: usize,
+    ) -> anyhow::Result<CanonicalSession> {
+        let mut session = self.read_session(path)?;
+        if session.messages.len() > tail_messages {
+            let excess = session.messages.len() - tail_messages;
+            session.messages.drain(..excess);
+        }
+        Ok(session)
+    }
 
     /// Write a canonical session into this provider's native format.
     fn write_session(

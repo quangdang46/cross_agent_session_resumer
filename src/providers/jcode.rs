@@ -272,10 +272,12 @@ impl Provider for JCode {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        );
         let now = chrono::Utc::now();
         let target_path = Self::sessions_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot determine jcode sessions directory"))?
@@ -301,7 +303,10 @@ impl Provider for JCode {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("jcode --resume {session_id}")
+        format!(
+            "jcode --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

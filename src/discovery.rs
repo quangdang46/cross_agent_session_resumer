@@ -340,10 +340,24 @@ impl ProviderRegistry {
             });
         }
 
+        // Cheap extension pre-filter: providers whose native format cannot
+        // match the file extension are skipped before paying for a full
+        // `read_session` parse. Unknown/missing extensions probe everything.
+        let ext_slugs = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .and_then(|e| plausible_provider_slugs_for_ext(&e));
+
         let mut best: Option<(&dyn Provider, usize)> = None;
         let mut providers_tried: Vec<String> = Vec::new();
 
         for provider in &self.providers {
+            if let Some(slugs) = ext_slugs
+                && !slugs.contains(&provider.slug())
+            {
+                continue;
+            }
             providers_tried.push(provider.slug().to_string());
             let parsed = provider.read_session(path);
             let Ok(session) = parsed else {
@@ -548,6 +562,43 @@ fn canonical_provider_token(token: &str) -> &str {
     }
 }
 
+/// Provider slugs whose readers can plausibly handle a file with the given
+/// extension, used to skip full `read_session` parses during `--source`
+/// probing. Returns `None` for extensions with no cheap mapping (probe all).
+///
+/// Only the expensive text/JSON formats are gated; DB-backed providers
+/// (`.db`, `.vscdb`, `.sqlite`) already fail fast on a text file and vice
+/// versa, so they are left in the "probe everything" bucket implicitly by
+/// not appearing in the JSON/JSONL sets.
+fn plausible_provider_slugs_for_ext(ext: &str) -> Option<&'static [&'static str]> {
+    match ext {
+        // JSONL line-delimited providers. Cline/Amp/ChatGPT/Gemini store
+        // single-document `.json`; Aider stores Markdown; DB providers store
+        // SQLite — none of those can read a `.jsonl` session.
+        "jsonl" => Some(&[
+            "claude-code",
+            "codex",
+            "factory",
+            "openclaw",
+            "pi-agent",
+            "omp",
+            "clawdbot",
+            "grok",
+            "vibe",
+            "kiro",
+            "jcode",
+            "antigravity",
+        ]),
+        // Single-document JSON providers (incl. Codex legacy JSON rollouts
+        // and Grok `summary.json`). JSONL/Markdown/DB providers cannot read
+        // these — and several would DOM-parse the whole file as one line.
+        "json" => Some(&[
+            "gemini", "chatgpt", "jcode", "kiro", "cline", "amp", "codex", "grok",
+        ]),
+        _ => None,
+    }
+}
+
 fn is_plausible_session(session: &CanonicalSession) -> bool {
     if session.messages.is_empty() {
         return false;
@@ -647,43 +698,55 @@ impl ProviderRegistry {
                 }
             }
             "json" => {
-                let file = std::fs::File::open(path).ok()?;
-                let reader = std::io::BufReader::new(file);
-                let value: serde_json::Value = serde_json::from_reader(reader).ok()?;
+                // Large exports (ChatGPT conversations can be tens of MB) must
+                // not be DOM-parsed just to check top-level marker keys. Small
+                // files keep the exact `Value` path; large files fall back to a
+                // bounded prefix scan of depth-1 keys, which is equivalent for
+                // the `value.get("key")` presence checks below.
+                const JSON_PREFIX_BYTES: u64 = 256 * 1024;
+                let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                if file_len <= JSON_PREFIX_BYTES {
+                    let file = std::fs::File::open(path).ok()?;
+                    let reader = std::io::BufReader::new(file);
+                    let value: serde_json::Value = serde_json::from_reader(reader).ok()?;
+                    return self.infer_provider_from_json_value(&value);
+                }
 
-                // Grok summary.json: info.id + info.cwd + chat_format_version.
-                if value.pointer("/info/id").is_some()
-                    && (value.get("chat_format_version").is_some()
-                        || value.get("grok_home").is_some()
-                        || value.get("num_chat_messages").is_some())
+                let keys = json_top_level_keys_prefix(path, JSON_PREFIX_BYTES as usize)?;
+                let has = |k: &str| keys.iter().any(|key| key == k);
+
+                // Grok summary.json: info.id + one of the grok marker keys.
+                // `/info/id` is nested, so confirm with a full parse only when
+                // the cheap key scan already looks like a Grok summary.
+                if has("info")
+                    && (has("chat_format_version") || has("grok_home") || has("num_chat_messages"))
+                    && self.json_doc_has_info_id(path)
                 {
                     return self.find_by_slug("grok");
                 }
 
-                if value.get("sessionId").is_some() && value.get("messages").is_some() {
+                if has("sessionId") && has("messages") {
                     return self.find_by_slug("gemini");
                 }
 
                 // jcode snapshot: top-level `id` + `messages` + `created_at`,
                 // and none of the gemini/chatgpt/codex marker keys.
-                if value.get("id").is_some()
-                    && value.get("messages").is_some()
-                    && value.get("created_at").is_some()
-                    && value.get("sessionId").is_none()
-                    && value.get("mapping").is_none()
-                    && value.get("session").is_none()
+                if has("id")
+                    && has("messages")
+                    && has("created_at")
+                    && !has("sessionId")
+                    && !has("mapping")
+                    && !has("session")
                 {
                     return self.find_by_slug("jcode");
                 }
 
                 // ChatGPT mapping-based conversation format.
-                if value.get("mapping").is_some()
-                    && (value.get("id").is_some() || value.get("conversation_id").is_some())
-                {
+                if has("mapping") && (has("id") || has("conversation_id")) {
                     return self.find_by_slug("chatgpt");
                 }
 
-                if value.get("session").is_some() {
+                if has("session") {
                     return self.find_by_slug("codex");
                 }
             }
@@ -691,6 +754,132 @@ impl ProviderRegistry {
         }
         None
     }
+
+    /// Exact single-document JSON checks used for small files (and for the
+    /// rare Grok `/info/id` confirmation on large ones).
+    fn infer_provider_from_json_value(&self, value: &serde_json::Value) -> Option<&dyn Provider> {
+        // Grok summary.json: info.id + info.cwd + chat_format_version.
+        if value.pointer("/info/id").is_some()
+            && (value.get("chat_format_version").is_some()
+                || value.get("grok_home").is_some()
+                || value.get("num_chat_messages").is_some())
+        {
+            return self.find_by_slug("grok");
+        }
+
+        if value.get("sessionId").is_some() && value.get("messages").is_some() {
+            return self.find_by_slug("gemini");
+        }
+
+        // jcode snapshot: top-level `id` + `messages` + `created_at`,
+        // and none of the gemini/chatgpt/codex marker keys.
+        if value.get("id").is_some()
+            && value.get("messages").is_some()
+            && value.get("created_at").is_some()
+            && value.get("sessionId").is_none()
+            && value.get("mapping").is_none()
+            && value.get("session").is_none()
+        {
+            return self.find_by_slug("jcode");
+        }
+
+        // ChatGPT mapping-based conversation format.
+        if value.get("mapping").is_some()
+            && (value.get("id").is_some() || value.get("conversation_id").is_some())
+        {
+            return self.find_by_slug("chatgpt");
+        }
+
+        if value.get("session").is_some() {
+            return self.find_by_slug("codex");
+        }
+
+        None
+    }
+
+    /// Confirm the nested `/info/id` marker for a Grok `summary.json`.
+    /// Only invoked after the cheap top-level key scan already matched, so
+    /// the full parse cost is paid at most once per candidate file.
+    fn json_doc_has_info_id(&self, path: &Path) -> bool {
+        let Ok(file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let reader = std::io::BufReader::new(file);
+        serde_json::from_reader::<_, serde_json::Value>(reader)
+            .map(|v| v.pointer("/info/id").is_some())
+            .unwrap_or(false)
+    }
+}
+
+/// Extract the depth-1 (top-level) object keys of a JSON document by scanning
+/// at most `max_bytes` from the start. Equivalent to `value.get("key")`
+/// presence checks for well-formed prefixes; truncated tails simply yield a
+/// partial key set, and callers treat a miss as "unknown" rather than wrong.
+///
+/// The scanner tracks string/escape state and brace depth so keys inside
+/// nested objects, arrays, or string values are never reported.
+fn json_top_level_keys_prefix(path: &Path, max_bytes: usize) -> Option<Vec<String>> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::with_capacity(max_bytes.min(1 << 20));
+    file.take(max_bytes as u64).read_to_end(&mut buf).ok()?;
+
+    let mut keys: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut cur = String::new();
+    let mut candidate_key: Option<String> = None;
+
+    for &b in &buf {
+        if in_str {
+            if esc {
+                esc = false;
+                // Keep the raw byte; marker keys are plain ASCII so escape
+                // fidelity does not matter for the comparisons we perform.
+                cur.push(b as char);
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+                if depth == 1 {
+                    candidate_key = Some(std::mem::take(&mut cur));
+                }
+            } else {
+                cur.push(b as char);
+            }
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_str = true;
+                cur.clear();
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                candidate_key = None;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                if depth <= 0 {
+                    break;
+                }
+                candidate_key = None;
+            }
+            b':' if depth == 1 => {
+                if let Some(key) = candidate_key.take() {
+                    keys.push(key);
+                }
+            }
+            b',' | b' ' | b'\t' | b'\n' | b'\r' => {}
+            _ => {
+                candidate_key = None;
+            }
+        }
+    }
+
+    Some(keys)
 }
 
 /// Result of probing a provider for installation.

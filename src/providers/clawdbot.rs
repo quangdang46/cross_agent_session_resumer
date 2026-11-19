@@ -294,7 +294,10 @@ impl Provider for ClawdBot {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("clawdbot --resume {session_id}")
+        format!(
+            "clawdbot --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

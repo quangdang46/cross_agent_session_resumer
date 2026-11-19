@@ -473,7 +473,10 @@ impl Provider for OpenClaw {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("openclaw --resume {session_id}")
+        format!(
+            "openclaw --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

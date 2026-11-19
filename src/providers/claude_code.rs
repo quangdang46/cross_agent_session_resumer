@@ -213,6 +213,9 @@ impl Provider for ClaudeCode {
         let mut messages: Vec<CanonicalMessage> = Vec::new();
         let mut line_num: usize = 0;
         let mut skipped: usize = 0;
+        // Whole-file tool_use block count (incl. non-conversational entries),
+        // surfaced via `casr_tool_uses` so `casr list` need not rescan.
+        let mut file_tool_uses: usize = 0;
 
         for line_result in reader.lines() {
             line_num += 1;
@@ -239,6 +242,19 @@ impl Provider for ClaudeCode {
                     continue;
                 }
             };
+
+            if let Some(content_blocks) =
+                entry.pointer("/message/content").and_then(|v| v.as_array())
+            {
+                file_tool_uses = file_tool_uses.saturating_add(
+                    content_blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                        })
+                        .count(),
+                );
+            }
 
             // Extract session-level metadata from first entry that has them.
             if session_id.is_none()
@@ -443,6 +459,12 @@ impl Provider for ClaudeCode {
                 serde_json::Value::String(name),
             );
         }
+        if file_tool_uses > 0 {
+            metadata.insert(
+                "casr_tool_uses".into(),
+                serde_json::Value::from(file_tool_uses),
+            );
+        }
 
         debug!(
             session_id,
@@ -470,10 +492,12 @@ impl Provider for ClaudeCode {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        );
         let now = chrono::Utc::now();
         let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
@@ -589,7 +613,10 @@ impl Provider for ClaudeCode {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("claude --resume {session_id}")
+        format!(
+            "claude --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

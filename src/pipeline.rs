@@ -550,17 +550,19 @@ session unless your cwd matches the written workspace."
             all_warnings.push(
                 "Source and target provider are the same. Skipping conversion write.".to_string(),
             );
+            let session_id = canonical.session_id.clone();
+            let resume_command = target_provider.resume_command(&session_id);
             return Ok(ConversionResult {
                 source_provider: resolved.provider.slug().to_string(),
                 target_provider: target_provider.slug().to_string(),
-                canonical_session: canonical.clone(),
+                canonical_session: canonical,
                 written: if opts.dry_run {
                     None
                 } else {
                     Some(WrittenSession {
                         paths: Vec::new(),
-                        session_id: canonical.session_id.clone(),
-                        resume_command: target_provider.resume_command(&canonical.session_id),
+                        session_id,
+                        resume_command,
                         backup_path: None,
                         warnings: Vec::new(),
                     })
@@ -854,13 +856,20 @@ fn apply_context_budget(
     // 3. Enforce the token budget by dropping the oldest turns, pinning the
     //    first (task) message and keeping the most recent history.
     if max_tokens > 0 && canonical.messages.len() > 1 {
-        let total: usize = canonical.messages.iter().map(estimate_message_tokens).sum();
+        // Estimate once per message; `estimate_message_tokens` serializes tool
+        // arguments, so recomputing inside the trim loop would double that cost.
+        let estimates: Vec<usize> = canonical
+            .messages
+            .iter()
+            .map(estimate_message_tokens)
+            .collect();
+        let total: usize = estimates.iter().sum();
         if total > max_tokens {
-            let pinned = estimate_message_tokens(&canonical.messages[0]);
+            let pinned = estimates[0];
             let mut budget_left = max_tokens.saturating_sub(pinned);
             let mut keep_from = canonical.messages.len();
             for i in (1..canonical.messages.len()).rev() {
-                let t = estimate_message_tokens(&canonical.messages[i]);
+                let t = estimates[i];
                 if t > budget_left {
                     break;
                 }
@@ -969,6 +978,17 @@ fn role_content_multiset(
     atoms
 }
 
+/// Count of atoms present in one list but absent from the other, using set
+/// semantics identical to the previous `!other.contains(a)` checks but in
+/// O(n) via hash sets instead of O(n²) scans. Only used for mismatch
+/// diagnostics, so exact multiset multiplicity is not required.
+fn atom_diff_count(a: &[String], b: &[String]) -> usize {
+    let set_b: std::collections::HashSet<&str> = b.iter().map(String::as_str).collect();
+    let set_a: std::collections::HashSet<&str> = a.iter().map(String::as_str).collect();
+    a.iter().filter(|x| !set_b.contains(x.as_str())).count()
+        + b.iter().filter(|x| !set_a.contains(x.as_str())).count()
+}
+
 /// Sorted multiset of content atoms for Codex logical-event verification:
 /// message text, tool-call `(name, arguments)`, and tool-result content.
 /// Counts alone cannot detect mangled payloads, so hashes are compared too.
@@ -1060,8 +1080,7 @@ fn verify_readback(
                     "content mismatch: wrote {} content atoms, read back {} ({} differ)",
                     orig_atoms.len(),
                     rb_atoms.len(),
-                    orig_atoms.iter().filter(|a| !rb_atoms.contains(a)).count()
-                        + rb_atoms.iter().filter(|a| !orig_atoms.contains(a)).count()
+                    atom_diff_count(&orig_atoms, &rb_atoms)
                 )),
                 warnings,
             };
@@ -1123,8 +1142,7 @@ store only one tool-call id, so the rest are not recoverable on read-back."
                     "content mismatch: wrote {} expressible messages, read back {} ({} differ)",
                     orig_atoms.len(),
                     rb_atoms.len(),
-                    orig_atoms.iter().filter(|a| !rb_atoms.contains(a)).count()
-                        + rb_atoms.iter().filter(|a| !orig_atoms.contains(a)).count()
+                    atom_diff_count(&orig_atoms, &rb_atoms)
                 )),
                 warnings,
             };
@@ -1237,13 +1255,35 @@ fn perform_write_rollback(provider: &dyn Provider, written: &WrittenSession) -> 
     }
 }
 
+/// A `.bak*` path only backs `target` when its filename is
+/// `<target-filename>.bak…` (see [`find_backup_path`]). Multi-file providers
+/// (e.g. Cline, Aider) report a `backup_path` that belongs to a *different*
+/// file than `paths[0]`; restoring it over `paths[0]` would corrupt both.
+fn backup_belongs_to_target(target: &Path, backup: &Path) -> bool {
+    let (Some(target_name), Some(backup_name)) = (
+        target.file_name().and_then(|s| s.to_str()),
+        backup.file_name().and_then(|s| s.to_str()),
+    ) else {
+        return false;
+    };
+    backup_name
+        .strip_prefix(target_name)
+        .is_some_and(|rest| rest.starts_with(".bak"))
+}
+
 fn rollback_written_session(
     provider_slug: &str,
     written: &WrittenSession,
 ) -> Result<(), CasrError> {
     let target_path = written.paths.first().cloned();
-    if let Some(path) = &target_path
-        && let Some(backup_path) = &written.backup_path
+    // Only restore the backup when it actually backs `paths[0]`. Providers
+    // whose `backup_path` belongs to a sibling file (Cline's taskHistory.json,
+    // Aider's shared history file behind a virtual path) handle their own
+    // restore via [`Provider::rollback_written`]; the delete loop below still
+    // removes every recorded path.
+    let restored_backup = if let (Some(path), Some(backup_path)) =
+        (&target_path, &written.backup_path)
+        && backup_belongs_to_target(path, backup_path)
     {
         warn!(
             backup = %backup_path.display(),
@@ -1268,10 +1308,13 @@ fn rollback_written_session(
             provider: provider_slug.to_string(),
             detail: format!("failed to restore backup: {error}"),
         })?;
-    }
+        true
+    } else {
+        false
+    };
 
     for (index, path) in written.paths.iter().enumerate() {
-        if index == 0 && written.backup_path.is_some() {
+        if index == 0 && restored_backup {
             continue;
         }
         // OpenCode virtual paths encode the session as "<opencode.db>/<session-id>"
@@ -1308,6 +1351,55 @@ fn rollback_written_session(
     }
 
     Ok(())
+}
+
+/// Best-effort rollback of a partially-written multi-file provider write.
+///
+/// `entries` are `(target_path, backup_path)` pairs recorded as each
+/// [`atomic_write`] succeeded, in write order. Files are restored in reverse
+/// order so the most recently written file is rolled back first. Every error
+/// is logged and swallowed — this runs on an already-failing path and must
+/// not mask the original error.
+pub(crate) fn rollback_partial_write(entries: &[(PathBuf, Option<PathBuf>)], provider_slug: &str) {
+    for (path, backup_path) in entries.iter().rev() {
+        // Virtual paths (e.g. Aider's `<history-file>/<session-id>`) have a
+        // regular file as their parent; nothing exists on disk at that path.
+        if let Some(parent) = path.parent()
+            && parent.is_file()
+        {
+            continue;
+        }
+        if let Some(bak) = backup_path {
+            if let Err(e) = std::fs::remove_file(path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(
+                    provider = provider_slug,
+                    path = %path.display(),
+                    error = %e,
+                    "partial-write rollback: failed to remove unverified output"
+                );
+            }
+            if let Err(e) = std::fs::rename(bak, path) {
+                warn!(
+                    provider = provider_slug,
+                    backup = %bak.display(),
+                    target = %path.display(),
+                    error = %e,
+                    "partial-write rollback: failed to restore backup"
+                );
+            }
+        } else if let Err(e) = std::fs::remove_file(path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                provider = provider_slug,
+                path = %path.display(),
+                error = %e,
+                "partial-write rollback: failed to remove unverified output"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,6 +1465,37 @@ pub fn atomic_write(
     force: bool,
     provider_slug: &str,
 ) -> Result<AtomicWriteOutcome, CasrError> {
+    use std::io::Write as _;
+
+    atomic_write_inner(target_path, force, provider_slug, &mut |file| {
+        file.write_all(content)
+    })
+}
+
+/// Variant of [`atomic_write`] that streams content through a caller-provided
+/// writer instead of requiring one contiguous buffer. Used by providers that
+/// emit large JSONL outputs line-by-line.
+pub fn atomic_write_streaming<F>(
+    target_path: &Path,
+    force: bool,
+    provider_slug: &str,
+    write_content: F,
+) -> Result<AtomicWriteOutcome, CasrError>
+where
+    F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+{
+    let mut write_content = Some(write_content);
+    atomic_write_inner(target_path, force, provider_slug, &mut |file| {
+        write_content.take().expect("streaming writer invoked once")(file)
+    })
+}
+
+fn atomic_write_inner(
+    target_path: &Path,
+    force: bool,
+    provider_slug: &str,
+    write_content: &mut dyn FnMut(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<AtomicWriteOutcome, CasrError> {
     use std::io::Write;
 
     // 1. Create parent directories.
@@ -1435,7 +1558,7 @@ pub fn atomic_write(
         let mut file = std::fs::File::create(&temp_path)?;
         #[cfg(test)]
         maybe_inject_atomic_write_failure(AtomicWriteFailStage::WriteAll)?;
-        file.write_all(content)?;
+        write_content(&mut file)?;
         #[cfg(test)]
         maybe_inject_atomic_write_failure(AtomicWriteFailStage::Flush)?;
         file.flush()?;

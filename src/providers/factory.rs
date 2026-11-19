@@ -62,8 +62,10 @@ impl Factory {
     ///
     /// e.g., `/Users/alice/Dev/myproject` → `-Users-alice-Dev-myproject`
     fn encode_workspace_slug(path: &Path) -> String {
-        let s = path.to_string_lossy();
-        s.replace('/', "-")
+        // `\` and `:` are path separators / drive qualifiers on Windows —
+        // leaving them would let a workspace path escape the slug directory.
+        let s = path.to_string_lossy().replace(['\\', ':'], "-");
+        crate::discovery::sanitize_session_id_for_path(&s)
     }
 
     fn extract_tool_calls(
@@ -548,7 +550,10 @@ impl Provider for Factory {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("factory --resume {session_id}")
+        format!(
+            "factory --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

@@ -53,7 +53,8 @@ pub fn project_hash(workspace: &Path) -> String {
 /// where `<uuid-prefix>` is the first 8 chars of the session UUID.
 pub fn session_filename(session_id: &str, now: &chrono::DateTime<chrono::Utc>) -> String {
     let ts = now.format("%Y-%m-%dT%H-%M").to_string();
-    let prefix: String = session_id.chars().take(8).collect();
+    let safe_id = crate::discovery::sanitize_session_id_for_path(session_id);
+    let prefix: String = safe_id.chars().take(8).collect();
     format!("session-{ts}-{prefix}.json")
 }
 
@@ -260,8 +261,25 @@ impl Provider for Gemini {
             .unwrap_or_default();
 
         let mut messages: Vec<CanonicalMessage> = Vec::new();
+        // Whole-file tool-use marker count (incl. skipped empty messages),
+        // surfaced via `casr_tool_uses` so `casr list` need not rescan.
+        let mut file_tool_uses: usize = 0;
 
         for (i, msg) in msg_array.iter().enumerate() {
+            if let Some(parts) = msg.get("content").and_then(|v| v.as_array()) {
+                file_tool_uses = file_tool_uses.saturating_add(
+                    parts
+                        .iter()
+                        .filter(|part| {
+                            part.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                        })
+                        .count(),
+                );
+            }
+            if let Some(tool_calls) = msg.get("toolCalls").and_then(|v| v.as_array()) {
+                file_tool_uses = file_tool_uses.saturating_add(tool_calls.len());
+            }
+
             // Role: Gemini uses "type" field with "user" or "model".
             let role_str = msg
                 .get("type")
@@ -319,6 +337,12 @@ impl Provider for Gemini {
         if let Some(ref ph) = project_hash {
             metadata.insert("project_hash".into(), serde_json::Value::String(ph.clone()));
         }
+        if file_tool_uses > 0 {
+            metadata.insert(
+                "casr_tool_uses".into(),
+                serde_json::Value::from(file_tool_uses),
+            );
+        }
 
         debug!(
             session_id,
@@ -345,10 +369,12 @@ impl Provider for Gemini {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        );
         let now = chrono::Utc::now();
 
         // Determine target path.
@@ -360,11 +386,18 @@ impl Provider for Gemini {
         // session lands in the project bucket the user will resume from.
         let workspace_buf = crate::model::effective_workspace(session);
         let workspace_path = workspace_buf.as_path();
+        // Only trust a metadata-carried hash when it is a well-formed sha256
+        // hex digest; anything else falls back to hashing the workspace path.
         let hash = session
             .metadata
             .get("project_hash")
             .or_else(|| session.metadata.get("projectHash"))
             .and_then(serde_json::Value::as_str)
+            .filter(|h| {
+                h.len() == 64
+                    && h.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
             .map(ToString::to_string)
             .unwrap_or_else(|| project_hash(workspace_path));
         let chats_dir = tmp_dir.join(&hash).join("chats");
@@ -442,7 +475,10 @@ impl Provider for Gemini {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("gemini --resume {session_id}")
+        format!(
+            "gemini --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 
@@ -849,6 +885,15 @@ fn normalize_workspace_candidate(raw: &str) -> Option<PathBuf> {
 }
 
 fn session_id_from_file(path: &Path) -> Option<String> {
+    // Fast path: `sessionId` is a top-level key near the start of Gemini chat
+    // files, so scan a bounded prefix first and only fall back to a full
+    // DOM parse when the prefix is inconclusive. `casr list` calls this once
+    // per file, so avoiding the full parse matters.
+    const PREFIX_BYTES: u64 = 256 * 1024;
+    if let Some(id) = session_id_from_prefix(path, PREFIX_BYTES) {
+        return Some(id);
+    }
+
     #[derive(serde::Deserialize)]
     struct GeminiHeader {
         #[serde(rename = "sessionId")]
@@ -858,6 +903,111 @@ fn session_id_from_file(path: &Path) -> Option<String> {
     let reader = std::io::BufReader::new(file);
     let header: GeminiHeader = serde_json::from_reader(reader).ok()?;
     header.session_id
+}
+
+/// Extract a depth-1 `"sessionId"` string value from at most `max_bytes` of
+/// the file head. Returns `None` when the key is absent from the prefix or
+/// the value is truncated — callers then fall back to a full parse.
+fn session_id_from_prefix(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.by_ref().take(max_bytes).read_to_end(&mut buf).ok()?;
+    session_id_from_bytes(&buf)
+}
+
+fn session_id_from_bytes(buf: &[u8]) -> Option<String> {
+    const KEY: &[u8] = b"\"sessionId\"";
+
+    let mut search_from = 0usize;
+    while let Some(rel) = buf[search_from..].windows(KEY.len()).position(|w| w == KEY) {
+        let pos = search_from + rel;
+        search_from = pos + KEY.len();
+
+        // Confirm the match is a top-level object key: depth 1 at the quote,
+        // preceded (ignoring whitespace) by '{' or ','.
+        if json_depth_at(buf, pos) != Some(1) {
+            continue;
+        }
+        let prev = buf[..pos]
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map(|i| buf[i]);
+        if !matches!(prev, Some(b'{') | Some(b',')) {
+            continue;
+        }
+
+        // Expect `: "value"` after the key.
+        let mut i = pos + KEY.len();
+        while i < buf.len() && buf[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if buf.get(i) != Some(&b':') {
+            continue;
+        }
+        i += 1;
+        while i < buf.len() && buf[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if buf.get(i) != Some(&b'"') {
+            continue;
+        }
+        i += 1;
+        let start = i;
+        let mut out = String::new();
+        let mut closed = false;
+        while i < buf.len() {
+            match buf[i] {
+                b'"' => {
+                    closed = true;
+                    break;
+                }
+                b'\\' => {
+                    // Escapes are unexpected in session ids; bail to the
+                    // full-parse fallback rather than risk a wrong value.
+                    return None;
+                }
+                b => {
+                    out.push(b as char);
+                    i += 1;
+                }
+            }
+        }
+        if closed {
+            return Some(out);
+        }
+        let _ = start;
+        return None;
+    }
+    None
+}
+
+/// JSON structural depth at byte offset `pos`, tracking string/escape state.
+/// Returns `None` when `pos` falls inside a string.
+fn json_depth_at(buf: &[u8], pos: usize) -> Option<i32> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for &b in &buf[..pos.min(buf.len())] {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    if in_str { None } else { Some(depth) }
 }
 
 #[cfg(test)]

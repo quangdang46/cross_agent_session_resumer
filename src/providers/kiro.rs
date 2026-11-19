@@ -429,25 +429,62 @@ impl Provider for Kiro {
         }
 
         // --- Write all files atomically -----------------------------------
+        // Record each outcome so a mid-sequence failure rolls the whole write
+        // back instead of leaving a half-written session.
         let mut written_paths = Vec::new();
+        let mut written_entries: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
 
         let json_outcome =
-            crate::pipeline::atomic_write(&json_path, &json_bytes, opts.force, self.slug())?;
+            match crate::pipeline::atomic_write(&json_path, &json_bytes, opts.force, self.slug()) {
+                Ok(o) => o,
+                Err(e) => {
+                    crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                    return Err(e.into());
+                }
+            };
         let backup_path = json_outcome.backup_path.clone();
+        written_entries.push((
+            json_outcome.target_path.clone(),
+            json_outcome.backup_path.clone(),
+        ));
         written_paths.push(json_outcome.target_path);
 
-        let jsonl_outcome =
-            crate::pipeline::atomic_write(&jsonl_path, jsonl.as_bytes(), opts.force, self.slug())?;
+        let jsonl_outcome = match crate::pipeline::atomic_write(
+            &jsonl_path,
+            jsonl.as_bytes(),
+            opts.force,
+            self.slug(),
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                return Err(e.into());
+            }
+        };
+        written_entries.push((
+            jsonl_outcome.target_path.clone(),
+            jsonl_outcome.backup_path.clone(),
+        ));
         written_paths.push(jsonl_outcome.target_path);
 
         // `.history` is optional; only emit when we carried one through.
         if let Some(history) = session.metadata.get("history").and_then(|v| v.as_str()) {
-            let hist_outcome = crate::pipeline::atomic_write(
+            let hist_outcome = match crate::pipeline::atomic_write(
                 &history_path,
                 history.as_bytes(),
                 opts.force,
                 self.slug(),
-            )?;
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    crate::pipeline::rollback_partial_write(&written_entries, self.slug());
+                    return Err(e.into());
+                }
+            };
+            written_entries.push((
+                hist_outcome.target_path.clone(),
+                hist_outcome.backup_path.clone(),
+            ));
             written_paths.push(hist_outcome.target_path);
         }
 
@@ -468,7 +505,10 @@ impl Provider for Kiro {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("kiro-cli --resume-id {session_id}")
+        format!(
+            "kiro-cli --resume-id {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

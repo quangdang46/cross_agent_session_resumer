@@ -707,10 +707,12 @@ impl Provider for Amp {
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
         let threads_root = Self::pick_threads_root_for_write()?;
-        let thread_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(Self::generate_thread_id);
+        let thread_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .unwrap_or_else(Self::generate_thread_id),
+        );
 
         let created = session
             .started_at
@@ -734,7 +736,10 @@ impl Provider for Amp {
     fn resume_command(&self, session_id: &str) -> String {
         // Amp doesn't have a stable "resume exact local thread file" CLI contract.
         // The most portable action is to reference the thread by ID in a new prompt.
-        format!("amp threads continue --execute \"Continue from @{session_id}\"")
+        format!(
+            "amp threads continue --execute \"Continue from @{}\"",
+            crate::providers::shell_escape_dq(session_id)
+        )
     }
 }
 

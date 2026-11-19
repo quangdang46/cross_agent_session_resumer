@@ -860,7 +860,10 @@ impl Provider for Hermes {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("hermes --resume {session_id}")
+        format!(
+            "hermes --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {

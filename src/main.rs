@@ -735,104 +735,6 @@ fn cmd_list(
         format!("{truncated}…")
     }
 
-    fn codex_tool_uses_from_file(path: &Path) -> usize {
-        let Ok(file) = std::fs::File::open(path) else {
-            return 0;
-        };
-        let reader = BufReader::new(file);
-        let mut count: usize = 0;
-
-        for line in reader.lines().map_while(Result::ok) {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                continue;
-            };
-            if entry.get("type").and_then(|v| v.as_str()) != Some("response_item") {
-                continue;
-            }
-            let payload_type = entry
-                .pointer("/payload/type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if matches!(payload_type, "function_call" | "custom_tool_call") {
-                count = count.saturating_add(1);
-            }
-            if let Some(content) = entry.pointer("/payload/content").and_then(|v| v.as_array()) {
-                count = count.saturating_add(
-                    content
-                        .iter()
-                        .filter(|block| {
-                            block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-                        })
-                        .count(),
-                );
-            }
-        }
-
-        count
-    }
-
-    fn gemini_tool_uses_from_file(path: &Path) -> usize {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return 0;
-        };
-        let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
-            return 0;
-        };
-        let mut count: usize = 0;
-        if let Some(messages) = root.get("messages").and_then(|v| v.as_array()) {
-            for msg in messages {
-                if let Some(parts) = msg.get("content").and_then(|v| v.as_array()) {
-                    count = count.saturating_add(
-                        parts
-                            .iter()
-                            .filter(|part| {
-                                part.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-                            })
-                            .count(),
-                    );
-                }
-                if let Some(tool_calls) = msg.get("toolCalls").and_then(|v| v.as_array()) {
-                    count = count.saturating_add(tool_calls.len());
-                }
-            }
-        }
-        count
-    }
-
-    fn claude_tool_uses_from_file(path: &Path) -> usize {
-        let Ok(file) = std::fs::File::open(path) else {
-            return 0;
-        };
-        let reader = BufReader::new(file);
-        let mut count: usize = 0;
-
-        for line in reader.lines().map_while(Result::ok) {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                continue;
-            };
-            if let Some(content) = entry.pointer("/message/content").and_then(|v| v.as_array()) {
-                count = count.saturating_add(
-                    content
-                        .iter()
-                        .filter(|block| {
-                            block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-                        })
-                        .count(),
-                );
-            }
-        }
-
-        count
-    }
-
     fn factory_tool_uses_from_file(path: &Path) -> usize {
         let Ok(file) = std::fs::File::open(path) else {
             return 0;
@@ -879,10 +781,9 @@ fn cmd_list(
     }
 
     fn tool_uses_from_source_file(provider_slug: &str, path: &Path) -> usize {
+        // Only Factory lacks a `casr_tool_uses` metadata stash; its file scan
+        // remains as the fallback for sessions with no canonical tool calls.
         match provider_slug {
-            "codex" => codex_tool_uses_from_file(path),
-            "gemini" => gemini_tool_uses_from_file(path),
-            "claude-code" => claude_tool_uses_from_file(path),
             "factory" => factory_tool_uses_from_file(path),
             _ => 0,
         }
@@ -994,10 +895,19 @@ fn cmd_list(
             0.0
         };
 
+        // Providers stash a whole-file tool-use count in `casr_tool_uses`
+        // metadata during `read_session`, so the common path never reparses
+        // the source file. Only Factory still falls back to a file scan
+        // (its reader is owned by a concurrent fix; the scan is equivalent).
         let tool_uses = if canonical_tool_uses > 0 {
             canonical_tool_uses
         } else {
-            tool_uses_from_source_file(provider_slug, path)
+            session
+                .metadata
+                .get("casr_tool_uses")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or_else(|| tool_uses_from_source_file(provider_slug, path))
         };
 
         (
@@ -1250,7 +1160,9 @@ fn cmd_list(
 
     let mut sessions: Vec<SessionSummary> = Vec::new();
 
-    const LIST_PARSE_PARALLEL_THRESHOLD: usize = 256;
+    // Parallelize parses much earlier: session files are I/O + JSON bound, so
+    // rayon pays off well below the old 256-candidate threshold.
+    const LIST_PARSE_PARALLEL_THRESHOLD: usize = 48;
 
     for provider in &installed {
         tracing::debug!(provider = provider.slug(), "scanning provider for sessions");

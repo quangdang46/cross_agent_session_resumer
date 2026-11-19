@@ -1467,8 +1467,8 @@ mod tests {
 
         let ids = Cursor::list_composer_ids(&conn);
         assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&"session-a".to_string()));
-        assert!(ids.contains(&"session-b".to_string()));
+        assert!(ids.iter().any(|i| i == "session-a"));
+        assert!(ids.iter().any(|i| i == "session-b"));
     }
 
     #[test]
@@ -1813,7 +1813,7 @@ mod tests {
         let conn = Cursor::open_db(&db_path).expect("open");
         let ids = Cursor::list_composer_ids(&conn);
         assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&"comp-aaa".to_string()));
-        assert!(ids.contains(&"comp-bbb".to_string()));
+        assert!(ids.iter().any(|i| i == "comp-aaa"));
+        assert!(ids.iter().any(|i| i == "comp-bbb"));
     }
 }

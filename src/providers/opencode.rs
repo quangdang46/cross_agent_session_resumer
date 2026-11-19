@@ -967,7 +967,7 @@ content is not preserved as structured output (any synthesized message text stil
         // OpenCode non-interactive resume uses `run -s <id>`; IDs must be
         // `ses_…` (enforced on write).
         let id = Self::ensure_ses_prefix(session_id);
-        format!("opencode run -s {id}")
+        format!("opencode run -s {}", crate::providers::shell_quote_arg(&id))
     }
 
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {

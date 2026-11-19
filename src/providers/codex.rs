@@ -48,7 +48,10 @@ pub fn rollout_path(
 ) -> PathBuf {
     let date_dir = now.format("%Y/%m/%d").to_string();
     let ts_part = now.format("%Y-%m-%dT%H-%M-%S").to_string();
-    let filename = format!("rollout-{ts_part}-{session_id}.jsonl");
+    let filename = format!(
+        "rollout-{ts_part}-{}.jsonl",
+        crate::discovery::sanitize_session_id_for_path(session_id)
+    );
     sessions_dir.join(date_dir).join(filename)
 }
 
@@ -209,7 +212,13 @@ impl Provider for Codex {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or_default();
-                if name_no_ext.ends_with(session_id) {
+                // Boundary check: the id must be preceded by `-` so
+                // "rollout-…-abc" cannot match session id "bc".
+                if !session_id.is_empty()
+                    && name_no_ext
+                        .strip_suffix(session_id)
+                        .is_some_and(|prefix| prefix.ends_with('-'))
+                {
                     debug!(path = %path.display(), "found Codex session by filename suffix");
                     return Some(path.to_path_buf());
                 }
@@ -253,11 +262,13 @@ impl Provider for Codex {
         // Prefer the pipeline-supplied deterministic id so re-running the same
         // conversion (especially with `--force`) overwrites the same thread
         // instead of minting a new UUID and orphaning the previous rollout.
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        );
         let now = chrono::Utc::now();
         // Prefer the source session start time for the path stamp so the
         // rollout filename is stable across force rewrites in the same second
@@ -282,59 +293,67 @@ impl Provider for Codex {
             "writing Codex session"
         );
 
-        let mut lines: Vec<String> = Vec::with_capacity(session.messages.len() + 1);
-
-        // 1. session_meta line.
         // Missing workspace falls back to the invoking cwd (never /tmp) so the
         // resumed thread points at the directory the user actually works in.
+        // Computed once here: also needed by `register_thread` after the write.
         let cwd = crate::model::effective_workspace(session)
             .to_string_lossy()
             .to_string();
 
-        // Current Codex readers deserialize each rollout line's top-level
-        // `timestamp` as an RFC3339 *string* (not a numeric epoch). Emit the
-        // string form both at the envelope level and inside the payload.
-        let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        lines.push(serde_json::to_string(&serde_json::json!({
-            "type": "session_meta",
-            "timestamp": now_iso,
-            "payload": {
-                // Codex indexes threads by `id`; recent builds also read
-                // `session_id`. Emit both so discovery works across versions.
-                "id": target_session_id,
-                "session_id": target_session_id,
-                "cwd": cwd,
-                "timestamp": now_iso,
-                "originator": "casr",
-                "cli_version": env!("CARGO_PKG_VERSION"),
-                "source": "cli",
-                "thread_source": "user",
-                "model_provider": "openai",
-            }
-        }))?);
+        // Stream lines to the temp file instead of materializing the whole
+        // rollout as one joined `String`.
+        let outcome = crate::pipeline::atomic_write_streaming(
+            &target_path,
+            opts.force,
+            self.slug(),
+            |file| {
+                use std::io::Write as _;
+                let mut writer = std::io::BufWriter::new(file);
+                // 1. session_meta line.
+                // Current Codex readers deserialize each rollout line's
+                // top-level `timestamp` as an RFC3339 *string* (not a numeric
+                // epoch). Emit the string form both at the envelope level and
+                // inside the payload.
+                let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let meta_line = serde_json::to_string(&serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": now_iso,
+                    "payload": {
+                        // Codex indexes threads by `id`; recent builds also read
+                        // `session_id`. Emit both so discovery works across versions.
+                        "id": target_session_id,
+                        "session_id": target_session_id,
+                        "cwd": cwd,
+                        "timestamp": now_iso,
+                        "originator": "casr",
+                        "cli_version": env!("CARGO_PKG_VERSION"),
+                        "source": "cli",
+                        "thread_source": "user",
+                        "model_provider": "openai",
+                    }
+                }))
+                .map_err(std::io::Error::other)?;
+                writeln!(writer, "{meta_line}")?;
 
-        // 2. Messages. Each envelope carries an RFC3339 string timestamp.
-        for msg in &session.messages {
-            let msg_iso = msg
-                .timestamp
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .unwrap_or(now)
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                // 2. Messages. Each envelope carries an RFC3339 string timestamp.
+                for msg in &session.messages {
+                    let msg_iso = msg
+                        .timestamp
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .unwrap_or(now)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-            for event in codex_events_for_message(msg, &msg_iso) {
-                lines.push(serde_json::to_string(&event)?);
-            }
-        }
-
-        // Trailing newline is required: Codex appends new events by writing
-        // after the last byte. Without a final `\n`, the first append glues
-        // onto the last history line and corrupts JSONL.
-        let mut content = lines.join("\n");
-        content.push('\n');
-        let content_bytes = content.into_bytes();
-
-        let outcome =
-            crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force, self.slug())?;
+                    for event in codex_events_for_message(msg, &msg_iso) {
+                        let line = serde_json::to_string(&event).map_err(std::io::Error::other)?;
+                        writeln!(writer, "{line}")?;
+                    }
+                }
+                // Trailing newline is required: Codex appends new events by
+                // writing after the last byte. `writeln!` already terminates
+                // every line, so the file always ends with `\n`.
+                writer.flush()
+            },
+        )?;
 
         info!(
             target_session_id,
@@ -391,7 +410,10 @@ impl Provider for Codex {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("codex resume {session_id}")
+        format!(
+            "codex resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 
@@ -1006,6 +1028,10 @@ impl Codex {
         let mut ended_at: Option<i64> = None;
         let mut messages: Vec<CanonicalMessage> = Vec::new();
         let mut skipped: usize = 0;
+        // Whole-file tool-use marker count (incl. lines later deduped or
+        // dropped by compaction), surfaced via `casr_tool_uses` metadata so
+        // `casr list` need not rescan the file.
+        let mut file_tool_uses: usize = 0;
         let mut line_num: usize = 0;
 
         for line_result in reader.lines() {
@@ -1061,6 +1087,20 @@ impl Codex {
                         // classify them as Tool — target writers map Tool → user side.
                         let payload_type =
                             p.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                        if matches!(payload_type, "function_call" | "custom_tool_call") {
+                            file_tool_uses = file_tool_uses.saturating_add(1);
+                        }
+                        if let Some(content_blocks) = p.get("content").and_then(|v| v.as_array()) {
+                            file_tool_uses = file_tool_uses.saturating_add(
+                                content_blocks
+                                    .iter()
+                                    .filter(|block| {
+                                        block.get("type").and_then(|v| v.as_str())
+                                            == Some("tool_use")
+                                    })
+                                    .count(),
+                            );
+                        }
                         let role = if matches!(
                             payload_type,
                             "function_call_output" | "custom_tool_call_output"
@@ -1097,7 +1137,7 @@ impl Codex {
                             author: None,
                             tool_calls,
                             tool_results,
-                            extra: envelope,
+                            extra: codex_prune_extra_envelope(envelope),
                         };
 
                         // Some Codex files mirror user turns in both
@@ -1136,7 +1176,7 @@ impl Codex {
                                         author: None,
                                         tool_calls: vec![],
                                         tool_results: vec![],
-                                        extra: envelope,
+                                        extra: codex_prune_extra_envelope(envelope),
                                     };
 
                                     let is_adjacent_user_duplicate =
@@ -1171,7 +1211,7 @@ impl Codex {
                                         author: Some("reasoning".to_string()),
                                         tool_calls: vec![],
                                         tool_results: vec![],
-                                        extra: envelope,
+                                        extra: codex_prune_extra_envelope(envelope),
                                     });
                                 }
                             }
@@ -1269,7 +1309,14 @@ impl Codex {
 
         reindex_messages(&mut messages);
         self.build_session(
-            path, session_id, workspace, started_at, ended_at, messages, skipped,
+            path,
+            session_id,
+            workspace,
+            started_at,
+            ended_at,
+            messages,
+            skipped,
+            file_tool_uses,
         )
     }
 
@@ -1330,7 +1377,7 @@ impl Codex {
 
         reindex_messages(&mut messages);
         self.build_session(
-            path, session_id, workspace, started_at, ended_at, messages, 0,
+            path, session_id, workspace, started_at, ended_at, messages, 0, 0,
         )
     }
 
@@ -1348,6 +1395,7 @@ impl Codex {
         ended_at: Option<i64>,
         messages: Vec<CanonicalMessage>,
         skipped: usize,
+        file_tool_uses: usize,
     ) -> anyhow::Result<CanonicalSession> {
         // Derive session ID from relative path if not in content.
         let session_id = session_id.unwrap_or_else(|| {
@@ -1380,6 +1428,12 @@ impl Codex {
                 serde_json::json!([format!(
                     "Skipped {skipped} malformed or unreadable line(s) while reading the Codex session."
                 )]),
+            );
+        }
+        if file_tool_uses > 0 {
+            metadata.insert(
+                "casr_tool_uses".into(),
+                serde_json::Value::from(file_tool_uses),
             );
         }
 
@@ -1595,13 +1649,42 @@ fn codex_parse_arguments_value(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Strip content subtrees already lifted into `CanonicalMessage` fields
+/// (`content`, `tool_calls`, `tool_results`) so `extra` retains only small
+/// metadata (usage/token counts, ids, status). Without this, every message
+/// keeps a second full copy of its payload — the dominant memory/clone cost
+/// for large rollouts.
+fn codex_prune_extra_envelope(mut envelope: serde_json::Value) -> serde_json::Value {
+    if let Some(payload) = envelope.get_mut("payload").and_then(|v| v.as_object_mut()) {
+        for key in [
+            "content",
+            "output",
+            "result",
+            "arguments",
+            "input",
+            "args",
+            "text",
+        ] {
+            payload.remove(key);
+        }
+        // `event_msg.user_message` stores the turn text in `payload.message`
+        // (a plain string); object forms may nest a `content` field.
+        if payload.get("message").is_some_and(|v| v.is_string()) {
+            payload.remove("message");
+        } else if let Some(msg) = payload.get_mut("message").and_then(|v| v.as_object_mut()) {
+            msg.remove("content");
+        }
+    }
+    envelope
+}
+
 /// Extract `session_meta.payload.id` from a Codex rollout file.
 fn session_meta_id(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(Result::ok).take(64) {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || !trimmed.contains("session_meta") {
             continue;
         }
         let envelope: serde_json::Value = match serde_json::from_str(trimmed) {

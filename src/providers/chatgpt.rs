@@ -187,6 +187,14 @@ impl Provider for ChatGpt {
 
                 // Deeper check: parse JSON and look for matching "id" or "conversation_id".
                 // Use a minimal struct to avoid allocating the massive `mapping` objects in memory.
+                //
+                // Conversation files can be tens of MB, so first do a cheap
+                // case-insensitive substring scan for the session id: if the
+                // id bytes appear nowhere in the file it cannot match, and we
+                // skip the full header parse entirely.
+                if !file_may_contain_id(path, &id_lower) {
+                    continue;
+                }
                 #[derive(serde::Deserialize)]
                 struct ChatGptHeader {
                     id: Option<String>,
@@ -429,10 +437,12 @@ impl Provider for ChatGpt {
         session: &CanonicalSession,
         opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        let target_session_id = opts
-            .target_session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let target_session_id = crate::discovery::sanitize_session_id_for_path(
+            &opts
+                .target_session_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        );
 
         // Determine target directory.
         let home = Self::home_dir()
@@ -559,8 +569,53 @@ impl Provider for ChatGpt {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("open \"https://chatgpt.com/c/{session_id}\"")
+        format!(
+            "open \"https://chatgpt.com/c/{}\"",
+            urlencoding::encode(session_id)
+        )
     }
+}
+
+/// Cheap pre-filter for `owns_session`: true when the session id bytes appear
+/// anywhere in the file (case-insensitive). A non-match guarantees the JSON
+/// header cannot contain the id, so callers can skip the full parse. On read
+/// error we return `true` to preserve the previous "try parsing anyway" path.
+fn file_may_contain_id(path: &Path, id_lower: &str) -> bool {
+    use std::io::{BufReader, Read};
+
+    let needle = id_lower.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    let mut window: Vec<u8> = Vec::with_capacity(needle.len() * 2 + 4096);
+    let Ok(file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                window.extend_from_slice(&buf[..n]);
+                // Overlap by needle.len()-1 bytes so ids spanning chunk
+                // boundaries are still found.
+                if window.len() > needle.len() * 2 + 8192 {
+                    let keep = needle.len().saturating_sub(1) + 4096;
+                    let drop = window.len() - keep;
+                    window.drain(..drop);
+                }
+                if window
+                    .windows(needle.len())
+                    .any(|w| w.eq_ignore_ascii_case(needle))
+                {
+                    return true;
+                }
+            }
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

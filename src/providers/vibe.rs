@@ -283,43 +283,52 @@ impl Provider for Vibe {
             "writing Vibe session"
         );
 
-        let mut lines: Vec<String> = Vec::with_capacity(session.messages.len());
-        for msg in &session.messages {
-            let role_str = match &msg.role {
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::System => "system",
-                MessageRole::Tool => "tool",
-                MessageRole::Other(r) => r.as_str(),
-            };
-
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "role".into(),
-                serde_json::Value::String(role_str.to_string()),
-            );
-            obj.insert(
-                "content".into(),
-                serde_json::Value::String(msg.content.clone()),
-            );
-            if let Some(ts) = msg.timestamp {
-                let dt =
-                    chrono::DateTime::from_timestamp_millis(ts).unwrap_or_else(chrono::Utc::now);
-                obj.insert(
-                    "timestamp".into(),
-                    serde_json::Value::String(dt.to_rfc3339()),
-                );
-            }
-
-            lines.push(serde_json::to_string(&serde_json::Value::Object(obj))?);
-        }
-
-        let content = lines.join("\n") + "\n";
-        let outcome = crate::pipeline::atomic_write(
+        // Stream each JSONL line straight to the temp file instead of
+        // building a `Vec<String>` plus one joined copy of the whole session.
+        let outcome = crate::pipeline::atomic_write_streaming(
             &target_path,
-            content.as_bytes(),
             opts.force,
             self.slug(),
+            |file| {
+                use std::io::Write as _;
+                let mut writer = std::io::BufWriter::new(file);
+                for msg in &session.messages {
+                    let role_str = match &msg.role {
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::System => "system",
+                        MessageRole::Tool => "tool",
+                        MessageRole::Other(r) => r.as_str(),
+                    };
+
+                    let mut obj = serde_json::Map::new();
+                    obj.insert(
+                        "role".into(),
+                        serde_json::Value::String(role_str.to_string()),
+                    );
+                    obj.insert(
+                        "content".into(),
+                        serde_json::Value::String(msg.content.clone()),
+                    );
+                    if let Some(ts) = msg.timestamp {
+                        let dt = chrono::DateTime::from_timestamp_millis(ts)
+                            .unwrap_or_else(chrono::Utc::now);
+                        obj.insert(
+                            "timestamp".into(),
+                            serde_json::Value::String(dt.to_rfc3339()),
+                        );
+                    }
+
+                    let line = serde_json::to_string(&serde_json::Value::Object(obj))
+                        .map_err(std::io::Error::other)?;
+                    writeln!(writer, "{line}")?;
+                }
+                // Preserve the historical "\n" body for empty sessions.
+                if session.messages.is_empty() {
+                    writeln!(writer)?;
+                }
+                writer.flush()
+            },
         )?;
 
         info!(
@@ -339,7 +348,10 @@ impl Provider for Vibe {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("vibe --resume {session_id}")
+        format!(
+            "vibe --resume {}",
+            crate::providers::shell_quote_arg(session_id)
+        )
     }
 }
 

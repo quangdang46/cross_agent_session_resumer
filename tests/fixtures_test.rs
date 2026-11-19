@@ -409,7 +409,8 @@ fn fixture_agy_does_not_list_legacy_gmi_sessions() {
     let ids: Vec<String> = sessions.into_iter().map(|(id, _)| id).collect();
 
     assert!(
-        ids.contains(&"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
+        ids.iter()
+            .any(|i| i == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
         "agy should list its own conversation uuid: {ids:?}"
     );
     assert!(
@@ -423,7 +424,7 @@ fn fixture_agy_does_not_list_legacy_gmi_sessions() {
         .expect("gmi list_sessions returns Some");
     let gmi_ids: Vec<String> = gmi_sessions.into_iter().map(|(id, _)| id).collect();
     assert!(
-        gmi_ids.contains(&"gmi-legacy-001".to_string()),
+        gmi_ids.iter().any(|i| i == "gmi-legacy-001"),
         "gmi should list its own legacy session: {gmi_ids:?}"
     );
     assert!(

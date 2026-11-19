@@ -530,9 +530,16 @@ impl Provider for Aider {
         // Aider appends sessions to a shared history file. If a session block
         // with this deterministic id already exists, honor --force semantics:
         // conflict without it, replace the stale block with it.
-        if target_path.exists()
-            && let Ok(existing_content) = std::fs::read_to_string(&target_path)
-        {
+        if target_path.exists() {
+            // A read failure (non-UTF8, permissions) must NOT be treated as
+            // "no existing content" — proceeding would make atomic_write
+            // force-overwrite the file and silently wipe every prior session.
+            let existing_content = std::fs::read_to_string(&target_path).with_context(|| {
+                format!(
+                    "failed to read existing Aider history {}; refusing to overwrite",
+                    target_path.display()
+                )
+            })?;
             let (found, kept) = strip_aider_session_blocks(&existing_content, &target_session_id);
             if found && !opts.force {
                 return Err(crate::error::CasrError::SessionConflict {
@@ -613,6 +620,54 @@ impl Provider for Aider {
 
     fn resume_command(&self, _session_id: &str) -> String {
         "aider --restore-chat-history".to_string()
+    }
+
+    fn rollback_written(&self, written: &WrittenSession) -> anyhow::Result<()> {
+        // `paths[0]` is a virtual `<history-file>/<urlencoded-id>` path whose
+        // parent is a regular file; the real artifact is the shared history
+        // file, and `backup_path` backs THAT file (the pipeline's filename
+        // guard correctly skips it for the virtual path).
+        let Some(first) = written.paths.first() else {
+            return Ok(());
+        };
+        let Some((history_path, _session_id)) = Self::parse_virtual_path(first) else {
+            return Ok(());
+        };
+        if let Some(bak) = &written.backup_path {
+            // Only restore when the backup actually belongs to this history
+            // file (`<history>.md.bak*`).
+            let belongs = bak
+                .file_name()
+                .and_then(|n| n.to_str())
+                .zip(history_path.file_name().and_then(|n| n.to_str()))
+                .is_some_and(|(b, h)| {
+                    b.strip_prefix(h)
+                        .is_some_and(|rest| rest.starts_with(".bak"))
+                });
+            if belongs {
+                if let Err(e) = std::fs::remove_file(&history_path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    debug!(
+                        path = %history_path.display(),
+                        error = %e,
+                        "aider rollback: failed to remove rewritten history"
+                    );
+                }
+                if let Err(e) = std::fs::rename(bak, &history_path) {
+                    debug!(
+                        backup = %bak.display(),
+                        target = %history_path.display(),
+                        error = %e,
+                        "aider rollback: failed to restore history backup"
+                    );
+                }
+            }
+        } else {
+            // The history file was created by our write; remove it entirely.
+            let _ = std::fs::remove_file(&history_path);
+        }
+        Ok(())
     }
 
     fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
