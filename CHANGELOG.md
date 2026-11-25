@@ -58,6 +58,7 @@ Versions correspond to [GitHub Releases](https://github.com/Dicklesworthstone/cr
 
 ### Provider Compatibility
 
+- **Devin CLI provider (read/resume-only)**: read Devin CLI sessions from the XDG data dir (`$XDG_DATA_HOME/devin/cli`, default `~/.local/share/devin/cli`). Reads the resumable main chain out of `sessions.db` (`sessions` + `message_nodes` forest walked from `main_chain_id`) and ATIF `transcripts/*.json` exports passed via `--source`. Alias: `dvn`. Write is refused — `sessions.db` is a CLI-owned SQLite forest store with auxiliary tables (`tool_call_state`, `rendered_commits`, `subagent_heads`, `message_search`) and no supported import path.
 - **`developer` role mapping**: map the `developer` role to `System` so sessions with developer-authored system prompts round-trip correctly; also fixes Pi-Agent usage lookup ([`076c090`](https://github.com/Dicklesworthstone/cross_agent_session_resumer/commit/076c0902309be823005a6ff6843324324e12b5ff)).
 - **Codex/Pi serialization fidelity**: improve serialization accuracy during conversion between Codex and Pi-Agent ([`03a68c0`](https://github.com/Dicklesworthstone/cross_agent_session_resumer/commit/03a68c0f47871ecc9cd734816c476c4317a909db)).
 

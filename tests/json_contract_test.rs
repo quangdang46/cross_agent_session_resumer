@@ -283,8 +283,8 @@ fn contract_providers_json_shape() {
     let arr = providers_array(&parsed);
     assert_eq!(
         arr.len(),
-        21,
-        "should list 21 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, OMP, Kiro, Grok, ZCode)"
+        22,
+        "should list 22 providers (CC, Codex, Gemini, Antigravity, jcode, Cursor, Cline, Aider, Amp, OpenCode, ChatGPT, ClawdBot, Vibe, Factory, OpenClaw, Hermes, Pi-Agent, OMP, Kiro, Grok, ZCode, Devin)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -300,6 +300,17 @@ fn contract_providers_json_shape() {
         agy["target_capable"].as_bool(),
         Some(false),
         "antigravity should have target_capable=false"
+    );
+
+    // Devin is likewise read/resume-only (CLI-owned SQLite forest store).
+    let dvn = arr
+        .iter()
+        .find(|p| p["slug"].as_str() == Some("devin"))
+        .expect("devin provider entry");
+    assert_eq!(
+        dvn["target_capable"].as_bool(),
+        Some(false),
+        "devin should have target_capable=false"
     );
 }
 
@@ -337,6 +348,7 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"jcode"), "should contain jcode");
     assert!(slugs.contains(&"hermes"), "should contain hermes");
     assert!(slugs.contains(&"grok"), "should contain grok");
+    assert!(slugs.contains(&"devin"), "should contain devin");
 }
 
 #[test]
@@ -378,6 +390,7 @@ fn contract_providers_aliases_match_slugs() {
             "hermes" => assert_eq!(*alias, "her"),
             "grok" => assert_eq!(*alias, "grk"),
             "zcode" => assert_eq!(*alias, "zc"),
+            "devin" => assert_eq!(*alias, "dvn"),
             other => panic!("Unexpected slug: {other}"),
         }
     }

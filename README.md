@@ -104,6 +104,8 @@ claude --resume <new-session-id>
 | Grok Build (xAI) | `grk` | Yes | Yes | `grok --resume <session-id>` |
 | jcode | `jc` | Yes | Yes | `jcode --resume <session-id>` |
 | Hermes | `her` | Yes | Yes | `hermes --resume <session-id>` |
+| ZCode (Z.AI ADE) | `zc` | Yes | Yes | `zcode --resume <session-id>` |
+| Devin CLI | `dvn` | Yes | No | `devin --resume <session-id>` |
 
 Notes:
 - Initial core focus is Claude Code, Codex, and Gemini CLI.

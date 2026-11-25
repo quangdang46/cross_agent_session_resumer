@@ -187,6 +187,7 @@ impl ProviderRegistry {
             Box::new(crate::providers::kiro::Kiro),
             Box::new(crate::providers::grok::Grok),
             Box::new(crate::providers::zcode::ZCode),
+            Box::new(crate::providers::devin::Devin),
         ])
     }
 
@@ -592,8 +593,10 @@ fn plausible_provider_slugs_for_ext(ext: &str) -> Option<&'static [&'static str]
         // Single-document JSON providers (incl. Codex legacy JSON rollouts
         // and Grok `summary.json`). JSONL/Markdown/DB providers cannot read
         // these — and several would DOM-parse the whole file as one line.
+        // Devin is included for its ATIF transcript exports; its reader
+        // sniffs `schema_version: "ATIF-*"` before parsing.
         "json" => Some(&[
-            "gemini", "chatgpt", "jcode", "kiro", "cline", "amp", "codex", "grok",
+            "gemini", "chatgpt", "jcode", "kiro", "cline", "amp", "codex", "grok", "devin",
         ]),
         _ => None,
     }
@@ -1457,7 +1460,7 @@ mod tests {
 
         let mut expected: Vec<String> = vec![
             "cc", "cod", "gmi", "agy", "cur", "cln", "aid", "amp", "opc", "gpt", "grk", "cwb",
-            "vib", "fac", "ocl", "kr", "jc", "pi", "omp", "her", "zc",
+            "vib", "fac", "ocl", "kr", "jc", "pi", "omp", "her", "zc", "dvn",
         ]
         .into_iter()
         .map(String::from)
